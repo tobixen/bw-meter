@@ -1,12 +1,16 @@
 # Installation
 
-bw-meter has two distinct parts:
+bw-meter has three distinct parts:
 
-* **Collectors** — `ptcpdump` instances that capture raw traffic per network interface.
+* **Collectors** — `ptcpdump` instances that capture raw traffic per network interface
+  and write rolling pcapng files to `/var/lib/bw-meter/<iface>/`.
   These run as root (they require raw-socket / eBPF access).
-* **CLI** — `bw-meter` itself, used to query the resulting SQLite database.
-  Reading the database does *not* require root, but the distiller (which writes the
-  database from root-owned pcapng files) currently runs as root as well.
+* **Distiller** — a periodic job (`bw-meter distill`) that reads closed pcapng files,
+  aggregates the data into a compact SQLite database, and deletes the raw captures.
+  Without the distiller running, no data reaches the database and the CLI has nothing
+  to report.  The distiller also runs as root so it can read the root-owned pcapng files.
+* **CLI** — `bw-meter <command>` queries the SQLite database and produces reports.
+  Reading the database does *not* require root.
 
 ## Prerequisites
 
@@ -39,7 +43,7 @@ This will:
 Enable one `ptcpdump@` instance per interface you want to monitor:
 
 ```sh
-systemctl enable --now ptcpdump@wlan0.service
+sudo systemctl enable --now ptcpdump@wlan0.service
 # repeat for other interfaces, e.g. ptcpdump@wg0.service
 ```
 
@@ -50,14 +54,29 @@ systemctl status ptcpdump@wlan0.service
 ls /var/lib/bw-meter/wlan0/
 ```
 
-### Enable the distiller timer
+### Enable the distiller
+
+The distiller (`bw-meter distill`) reads closed pcapng files from
+`/var/lib/bw-meter/`, aggregates their data into the SQLite database, and then
+deletes the raw captures to keep disk usage in check.  It is triggered by a
+systemd timer every 15 minutes:
 
 ```sh
 systemctl enable --now bw-meter-distill.timer
 ```
 
-The distiller runs every 15 minutes, processes any closed pcapng files, and writes
-aggregated data to the SQLite database.
+Verify it fired at least once:
+
+```sh
+systemctl status bw-meter-distill.timer
+journalctl -u bw-meter-distill.service
+```
+
+You can also run it manually at any time:
+
+```sh
+bw-meter distill
+```
 
 ## User install (no root, CLI only)
 
