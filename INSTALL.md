@@ -96,13 +96,15 @@ make install   # will auto-detect uv / pipx or fall back to pip --user
 
 ## Configuration
 
-Create `~/.config/bw-meter/config.toml` (or `/etc/bw-meter/config.toml` for system-wide
-defaults) to declare which interfaces count against your data cap:
+TODO: NOT IMPLEMENTED YET! (except `make enable` will honor the list of metered interfaces)
+
+Create  `/etc/bw-meter/config.toml` to declare which interfaces count against your data cap:
 
 ```toml
 [interfaces]
 metered = ["wlan0"]   # traffic on these interfaces is shown in reports by default
 
+## TODO: this is currently hard-coded, but we should support configuration
 [collection]
 bucket_secs    = 60   # aggregation granularity written to DB
 rotate_minutes = 15   # how often ptcpdump rolls over to a new pcapng file

@@ -238,46 +238,41 @@ Default: plain text table.  `--json` for machine-readable output.
 
 ## Configuration
 
-`~/.config/bw-meter/config.toml`:
-
-```toml
-[interfaces]
-# Interfaces whose traffic counts against the data cap.
-# The distiller will import pcapng files from all captured interfaces,
-# but reports default to filtering to these.
-metered = ["wlan0"]
-
-[collection]
-bucket_secs    = 60    # aggregation granularity written to DB
-rotate_minutes = 15    # how often ptcpdump rolls to a new pcapng file
-keep_raw_hours = 1     # delete raw pcapng files after this many hours
-```
+A configuration file should be supported.  See the INSTALL.md
 
 ---
 
 ## TODO (prioritised)
 
-1. **Core distiller and CLI** — the basic pipeline described above.
+### FIX NOW!
 
-2. **Systemd units** — `ptcpdump@.service` template + `bw-meter-distill.timer`.
+* **Core distiller and CLI** — the basic pipeline described above.
 
-3. **Rollup** — compact old 1-minute buckets into 10-minute buckets after 7 days to keep
+* **Systemd units** — `ptcpdump@.service` template + `bw-meter-distill.timer`.
+
+## Fix soon
+
+* **Rollup** — compact old 1-minute buckets into 10-minute buckets after 7 days to keep
    the database small.
 
-4. **WireGuard/VPN merging** — attribute untagged WireGuard bytes on a physical interface
+## Fix later
+
+* Support for Configuration file (see the INSTALL.md document)
+
+* **WireGuard/VPN merging** — attribute untagged WireGuard bytes on a physical interface
    to processes by proportional allocation from a simultaneously-captured VPN inner
    interface.  Requires the user to declare in config which interface pairs to merge.
 
-5. **Alerts** — notify when a process exceeds N MB in a rolling window, or when total
+* **Alerts** — notify when a process exceeds N MB in a rolling window, or when total
    monthly usage crosses a threshold.
 
-6. **Mobile data counter sync** — import the operator's own counter (e.g. from
+* **Mobile data counter sync** — import the operator's own counter (e.g. from
    `ditt.phonero.no`) to cross-check accumulated totals and detect off-device usage
    (e.g. tethering by another person).
 
-7. **atop integration** — correlate PID+timestamp with atop logs to surface CPU/memory
+* **atop integration** — correlate PID+timestamp with atop logs to surface CPU/memory
    context alongside traffic spikes.
 
-8. **Browser tab attribution** — use a browser extension to log tab URLs with timestamps,
+* **Browser tab attribution** — use a browser extension to log tab URLs with timestamps,
    then correlate with traffic by time window.  Would resolve the current limitation where
    all Chromium traffic is attributed to a single `chromium` process entry.
