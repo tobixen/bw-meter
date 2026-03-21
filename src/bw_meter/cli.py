@@ -1,12 +1,428 @@
 """bw-meter command-line interface."""
 
+from __future__ import annotations
+
 import argparse
+import datetime
+import json
+import re
+import sqlite3
 import sys
 from pathlib import Path
 
 import argcomplete
 
 from ._version import __version__
+from .timeutil import parse_dt
+
+_INTERVAL_RE = re.compile(r"^(\d+)([smhd])$")
+_INTERVAL_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
+
+
+def _format_bytes(n: int) -> str:
+    """Return *n* bytes as a human-readable string."""
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024:
+            return f"{n:.1f} {unit}"
+        n /= 1024  # type: ignore[assignment]
+    return f"{n:.1f} PB"
+
+
+def _parse_interval(s: str) -> int:
+    """Parse an interval string like '5m', '1h', '30s', '2d' into seconds."""
+    m = _INTERVAL_RE.match(s.strip())
+    if not m:
+        raise ValueError(f"Invalid interval {s!r}: expected a number followed by s/m/h/d")
+    return int(m.group(1)) * _INTERVAL_UNITS[m.group(2)]
+
+
+def _print_table(headers: list[str], rows: list[list]) -> None:
+    """Print a plain fixed-width text table to stdout."""
+    str_rows = [[str(c) for c in row] for row in rows]
+    widths = [len(h) for h in headers]
+    for row in str_rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(cell))
+    sep = "  "
+    fmt = sep.join(f"{{:<{w}}}" for w in widths)
+    print(fmt.format(*headers))
+    print(sep.join("-" * w for w in widths))
+    for row in str_rows:
+        print(fmt.format(*row))
+
+
+def _time_range(args: argparse.Namespace) -> tuple[int, int]:
+    """Return (since_ts, until_ts) as Unix epoch integers.
+
+    Defaults: since = start of current calendar month, until = now.
+    """
+    now = datetime.datetime.now().astimezone()
+    since_dt = parse_dt(args.since) if args.since else now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    until_dt = parse_dt(args.until) if args.until else now
+    return int(since_dt.timestamp()), int(until_dt.timestamp())
+
+
+def _iface_filter(args: argparse.Namespace) -> tuple[str, list]:
+    """Return an optional SQL WHERE fragment and its parameters for interface filtering."""
+    if getattr(args, "interface", None):
+        return "AND t.interface = ?", [args.interface]
+    return "", []
+
+
+def _open_conn(args: argparse.Namespace) -> sqlite3.Connection:
+    from .db import open_db
+
+    return open_db(args.db)
+
+
+# ---------------------------------------------------------------------------
+# Command handlers
+# ---------------------------------------------------------------------------
+
+
+def cmd_distill(args: argparse.Namespace) -> int:
+    from .distiller import run_distiller
+
+    run_distiller(
+        base_dir=args.base_dir,
+        db_path=args.db,
+        delete_after=not args.no_delete,
+    )
+    return 0
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    """Total bandwidth summary grouped by process."""
+    since_ts, until_ts = _time_range(args)
+    iface_sql, iface_params = _iface_filter(args)
+
+    conn = _open_conn(args)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT
+                COALESCE(p.name, '(kernel)') AS process,
+                SUM(CASE WHEN t.direction='in'  THEN t.bytes ELSE 0 END) AS bytes_in,
+                SUM(CASE WHEN t.direction='out' THEN t.bytes ELSE 0 END) AS bytes_out,
+                SUM(t.bytes) AS total_bytes,
+                SUM(t.packets) AS total_packets
+            FROM traffic t
+            LEFT JOIN process p ON t.process_id = p.id
+            WHERE t.ts >= ? AND t.ts < ?
+            {iface_sql}
+            GROUP BY COALESCE(p.name, '(kernel)')
+            ORDER BY total_bytes DESC
+            """,
+            [since_ts, until_ts, *iface_params],
+        ).fetchall()
+    finally:
+        conn.close()
+
+    if getattr(args, "json", False):
+        print(
+            json.dumps(
+                [
+                    {
+                        "process": r[0],
+                        "bytes_in": r[1],
+                        "bytes_out": r[2],
+                        "total_bytes": r[3],
+                        "total_packets": r[4],
+                    }
+                    for r in rows
+                ]
+            )
+        )
+    else:
+        _print_table(
+            ["Process", "In", "Out", "Total", "Packets"],
+            [[r[0], _format_bytes(r[1]), _format_bytes(r[2]), _format_bytes(r[3]), r[4]] for r in rows],
+        )
+    return 0
+
+
+def cmd_top(args: argparse.Namespace) -> int:
+    """Ranked table of top consumers by process, host, or process+host."""
+    since_ts, until_ts = _time_range(args)
+    iface_sql, iface_params = _iface_filter(args)
+    limit = args.limit
+    by = args.by
+
+    conn = _open_conn(args)
+    try:
+        if by == "process":
+            rows = conn.execute(
+                f"""
+                SELECT
+                    COALESCE(p.name, '(kernel)') AS process,
+                    SUM(t.bytes) AS total_bytes,
+                    SUM(t.packets) AS total_packets
+                FROM traffic t
+                LEFT JOIN process p ON t.process_id = p.id
+                WHERE t.ts >= ? AND t.ts < ?
+                {iface_sql}
+                GROUP BY COALESCE(p.name, '(kernel)')
+                ORDER BY total_bytes DESC
+                LIMIT ?
+                """,
+                [since_ts, until_ts, *iface_params, limit],
+            ).fetchall()
+            headers = ["#", "Process", "Total", "Packets"]
+            data_rows = [[i + 1, r[0], _format_bytes(r[1]), r[2]] for i, r in enumerate(rows)]
+            json_rows = [
+                {"rank": i + 1, "process": r[0], "total_bytes": r[1], "total_packets": r[2]} for i, r in enumerate(rows)
+            ]
+
+        elif by == "host":
+            rows = conn.execute(
+                f"""
+                SELECT
+                    COALESCE(h.hostname, h.ip, '(unknown)') AS host,
+                    SUM(t.bytes) AS total_bytes,
+                    SUM(t.packets) AS total_packets
+                FROM traffic t
+                LEFT JOIN host h ON t.host_id = h.id
+                WHERE t.ts >= ? AND t.ts < ?
+                {iface_sql}
+                GROUP BY COALESCE(h.hostname, h.ip, '(unknown)')
+                ORDER BY total_bytes DESC
+                LIMIT ?
+                """,
+                [since_ts, until_ts, *iface_params, limit],
+            ).fetchall()
+            headers = ["#", "Host", "Total", "Packets"]
+            data_rows = [[i + 1, r[0], _format_bytes(r[1]), r[2]] for i, r in enumerate(rows)]
+            json_rows = [
+                {"rank": i + 1, "host": r[0], "total_bytes": r[1], "total_packets": r[2]} for i, r in enumerate(rows)
+            ]
+
+        else:  # process+host
+            rows = conn.execute(
+                f"""
+                SELECT
+                    COALESCE(p.name, '(kernel)') AS process,
+                    COALESCE(h.hostname, h.ip, '(unknown)') AS host,
+                    SUM(t.bytes) AS total_bytes,
+                    SUM(t.packets) AS total_packets
+                FROM traffic t
+                LEFT JOIN process p ON t.process_id = p.id
+                LEFT JOIN host h ON t.host_id = h.id
+                WHERE t.ts >= ? AND t.ts < ?
+                {iface_sql}
+                GROUP BY COALESCE(p.name, '(kernel)'), COALESCE(h.hostname, h.ip, '(unknown)')
+                ORDER BY total_bytes DESC
+                LIMIT ?
+                """,
+                [since_ts, until_ts, *iface_params, limit],
+            ).fetchall()
+            headers = ["#", "Process", "Host", "Total", "Packets"]
+            data_rows = [[i + 1, r[0], r[1], _format_bytes(r[2]), r[3]] for i, r in enumerate(rows)]
+            json_rows = [
+                {
+                    "rank": i + 1,
+                    "process": r[0],
+                    "host": r[1],
+                    "total_bytes": r[2],
+                    "total_packets": r[3],
+                }
+                for i, r in enumerate(rows)
+            ]
+    finally:
+        conn.close()
+
+    if getattr(args, "json", False):
+        print(json.dumps(json_rows))
+    else:
+        _print_table(headers, data_rows)
+    return 0
+
+
+def cmd_timeline(args: argparse.Namespace) -> int:
+    """Time-series bandwidth view in fixed-width buckets."""
+    since_ts, until_ts = _time_range(args)
+    bucket_secs = _parse_interval(args.interval)
+    iface_sql, iface_params = _iface_filter(args)
+
+    extra_joins = ""
+    extra_where = ""
+    extra_params: list = []
+
+    if getattr(args, "process", None):
+        extra_joins += " LEFT JOIN process p ON t.process_id = p.id"
+        extra_where += " AND p.name = ?"
+        extra_params.append(args.process)
+    if getattr(args, "host", None):
+        extra_joins += " LEFT JOIN host h ON t.host_id = h.id"
+        extra_where += " AND (h.hostname = ? OR h.ip = ?)"
+        extra_params.extend([args.host, args.host])
+
+    conn = _open_conn(args)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT
+                (t.ts / ?) * ? AS bucket,
+                SUM(CASE WHEN t.direction='in'  THEN t.bytes ELSE 0 END) AS bytes_in,
+                SUM(CASE WHEN t.direction='out' THEN t.bytes ELSE 0 END) AS bytes_out,
+                SUM(t.bytes) AS total_bytes,
+                SUM(t.packets) AS total_packets
+            FROM traffic t
+            {extra_joins}
+            WHERE t.ts >= ? AND t.ts < ?
+            {iface_sql}
+            {extra_where}
+            GROUP BY bucket
+            ORDER BY bucket
+            """,
+            [bucket_secs, bucket_secs, since_ts, until_ts, *iface_params, *extra_params],
+        ).fetchall()
+    finally:
+        conn.close()
+
+    if getattr(args, "json", False):
+        print(
+            json.dumps(
+                [
+                    {
+                        "time": datetime.datetime.fromtimestamp(r[0]).isoformat(),
+                        "bytes_in": r[1],
+                        "bytes_out": r[2],
+                        "total_bytes": r[3],
+                        "total_packets": r[4],
+                    }
+                    for r in rows
+                ]
+            )
+        )
+    else:
+        _print_table(
+            ["Time", "In", "Out", "Total", "Packets"],
+            [
+                [
+                    datetime.datetime.fromtimestamp(r[0]).strftime("%Y-%m-%d %H:%M"),
+                    _format_bytes(r[1]),
+                    _format_bytes(r[2]),
+                    _format_bytes(r[3]),
+                    r[4],
+                ]
+                for r in rows
+            ],
+        )
+    return 0
+
+
+def cmd_hosts(args: argparse.Namespace) -> int:
+    """List the hosts that a given process connected to."""
+    since_ts, until_ts = _time_range(args)
+    iface_sql, iface_params = _iface_filter(args)
+
+    conn = _open_conn(args)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT
+                COALESCE(h.hostname, h.ip, '(unknown)') AS host,
+                SUM(CASE WHEN t.direction='in'  THEN t.bytes ELSE 0 END) AS bytes_in,
+                SUM(CASE WHEN t.direction='out' THEN t.bytes ELSE 0 END) AS bytes_out,
+                SUM(t.bytes) AS total_bytes,
+                SUM(t.packets) AS total_packets
+            FROM traffic t
+            LEFT JOIN process p ON t.process_id = p.id
+            LEFT JOIN host h ON t.host_id = h.id
+            WHERE t.ts >= ? AND t.ts < ?
+              AND p.name = ?
+            {iface_sql}
+            GROUP BY COALESCE(h.hostname, h.ip, '(unknown)')
+            ORDER BY total_bytes DESC
+            """,
+            [since_ts, until_ts, args.process, *iface_params],
+        ).fetchall()
+    finally:
+        conn.close()
+
+    if getattr(args, "json", False):
+        print(
+            json.dumps(
+                [
+                    {
+                        "host": r[0],
+                        "bytes_in": r[1],
+                        "bytes_out": r[2],
+                        "total_bytes": r[3],
+                        "total_packets": r[4],
+                    }
+                    for r in rows
+                ]
+            )
+        )
+    else:
+        _print_table(
+            ["Host", "In", "Out", "Total", "Packets"],
+            [[r[0], _format_bytes(r[1]), _format_bytes(r[2]), _format_bytes(r[3]), r[4]] for r in rows],
+        )
+    return 0
+
+
+def cmd_processes(args: argparse.Namespace) -> int:
+    """List the processes that connected to a given host."""
+    since_ts, until_ts = _time_range(args)
+    iface_sql, iface_params = _iface_filter(args)
+
+    conn = _open_conn(args)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT
+                COALESCE(p.name, '(kernel)') AS process,
+                SUM(CASE WHEN t.direction='in'  THEN t.bytes ELSE 0 END) AS bytes_in,
+                SUM(CASE WHEN t.direction='out' THEN t.bytes ELSE 0 END) AS bytes_out,
+                SUM(t.bytes) AS total_bytes,
+                SUM(t.packets) AS total_packets
+            FROM traffic t
+            LEFT JOIN process p ON t.process_id = p.id
+            LEFT JOIN host h ON t.host_id = h.id
+            WHERE t.ts >= ? AND t.ts < ?
+              AND (h.hostname = ? OR h.ip = ?)
+            {iface_sql}
+            GROUP BY COALESCE(p.name, '(kernel)')
+            ORDER BY total_bytes DESC
+            """,
+            [since_ts, until_ts, args.host, args.host, *iface_params],
+        ).fetchall()
+    finally:
+        conn.close()
+
+    if getattr(args, "json", False):
+        print(
+            json.dumps(
+                [
+                    {
+                        "process": r[0],
+                        "bytes_in": r[1],
+                        "bytes_out": r[2],
+                        "total_bytes": r[3],
+                        "total_packets": r[4],
+                    }
+                    for r in rows
+                ]
+            )
+        )
+    else:
+        _print_table(
+            ["Process", "In", "Out", "Total", "Packets"],
+            [[r[0], _format_bytes(r[1]), _format_bytes(r[2]), _format_bytes(r[3]), r[4]] for r in rows],
+        )
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Argument parser
+# ---------------------------------------------------------------------------
 
 
 def add_time_args(parser: argparse.ArgumentParser) -> None:
@@ -34,51 +450,6 @@ def add_time_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def add_interface_arg(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--interface",
-        "-i",
-        metavar="IFACE",
-        help="Filter to a specific interface (default: all metered interfaces from config)",
-    )
-
-
-def cmd_distill(args: argparse.Namespace) -> int:
-    from .distiller import run_distiller
-
-    run_distiller(
-        base_dir=args.base_dir,
-        db_path=args.db,
-        delete_after=not args.no_delete,
-    )
-    return 0
-
-
-def cmd_report(args: argparse.Namespace) -> int:
-    print("bw-meter report: not yet implemented")
-    return 0
-
-
-def cmd_top(args: argparse.Namespace) -> int:
-    print("bw-meter top: not yet implemented")
-    return 0
-
-
-def cmd_timeline(args: argparse.Namespace) -> int:
-    print("bw-meter timeline: not yet implemented")
-    return 0
-
-
-def cmd_hosts(args: argparse.Namespace) -> int:
-    print("bw-meter hosts: not yet implemented")
-    return 0
-
-
-def cmd_processes(args: argparse.Namespace) -> int:
-    print("bw-meter processes: not yet implemented")
-    return 0
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bw-meter",
@@ -96,6 +467,12 @@ def build_parser() -> argparse.ArgumentParser:
         "-i",
         metavar="IFACE",
         help="Filter to a specific interface (default: all metered interfaces from config)",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        default=False,
+        help="Output in machine-readable JSON format",
     )
 
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
@@ -137,7 +514,12 @@ def build_parser() -> argparse.ArgumentParser:
     # timeline
     p_tl = sub.add_parser("timeline", help="Time-series bandwidth view")
     add_time_args(p_tl)
-    p_tl.add_argument("--interval", default="5m", metavar="INTERVAL", help="Bucket size, e.g. 1m, 5m, 1h (default: 5m)")
+    p_tl.add_argument(
+        "--interval",
+        default="5m",
+        metavar="INTERVAL",
+        help="Bucket size, e.g. 1m, 5m, 1h (default: 5m)",
+    )
     p_tl.add_argument("--process", metavar="NAME", help="Filter to a specific process name")
     p_tl.add_argument("--host", metavar="HOSTNAME", help="Filter to a specific hostname")
     p_tl.set_defaults(func=cmd_timeline)
