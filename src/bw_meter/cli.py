@@ -2,6 +2,7 @@
 
 import argparse
 import sys
+from pathlib import Path
 
 import argcomplete
 
@@ -40,6 +41,17 @@ def add_interface_arg(parser: argparse.ArgumentParser) -> None:
         metavar="IFACE",
         help="Filter to a specific interface (default: all metered interfaces from config)",
     )
+
+
+def cmd_distill(args: argparse.Namespace) -> int:
+    from .distiller import run_distiller
+
+    run_distiller(
+        base_dir=args.base_dir,
+        db_path=args.db,
+        delete_after=not args.no_delete,
+    )
+    return 0
 
 
 def cmd_report(args: argparse.Namespace) -> int:
@@ -88,6 +100,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
     sub.required = True
+
+    # distill
+    p_distill = sub.add_parser("distill", help="Process raw pcapng captures into SQLite")
+    p_distill.add_argument(
+        "--base-dir",
+        type=Path,
+        default=Path("/var/lib/bw-meter"),
+        metavar="DIR",
+        help="Root directory containing per-interface pcapng capture subdirectories",
+    )
+    p_distill.add_argument(
+        "--no-delete",
+        action="store_true",
+        help="Keep raw pcapng files after processing (default: delete)",
+    )
+    p_distill.set_defaults(func=cmd_distill)
 
     # report
     p_report = sub.add_parser("report", help="Total bandwidth spending summary")

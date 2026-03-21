@@ -1,4 +1,4 @@
-.PHONY: help install install-systemd dev lint format test clean
+.PHONY: help install install-systemd enable dev lint format test clean
 
 INSTALL_VENV   := /usr/local/lib/bw-meter
 INSTALL_BIN    := /usr/local/bin
@@ -39,6 +39,24 @@ install-systemd:  ## Install systemd unit files (requires root)
 	@echo "    systemctl enable --now ptcpdump@<interface>.service"
 	@echo "  Enable the distiller timer:"
 	@echo "    systemctl enable --now bw-meter-distill.timer"
+
+enable:  ## Enable and start systemd units (requires root; reads interfaces from /etc/bw-meter/config.toml or IFACE=)
+	@[ "$$(id -u)" = "0" ] || { echo "enable requires root"; exit 1; }
+	@ifaces="$(IFACE)"; \
+	if [ -z "$$ifaces" ] && [ -f /etc/bw-meter/config.toml ]; then \
+		ifaces=$$(python3 -c " \
+import ast, sys; \
+lines = open('/etc/bw-meter/config.toml').read().splitlines(); \
+row = next((l for l in lines if l.strip().startswith('metered')), None); \
+row and print(' '.join(ast.literal_eval(row.split('=',1)[1].strip())))" 2>/dev/null); \
+	fi; \
+	[ -n "$$ifaces" ] || { \
+		echo "Error: no interfaces found."; \
+		echo "  Add 'metered = [\"<iface>\"]' under [interfaces] in /etc/bw-meter/config.toml,"; \
+		echo "  or pass IFACE=<iface> on the command line."; \
+		exit 1; }; \
+	for iface in $$ifaces; do systemctl enable --now ptcpdump@$$iface.service; done
+	systemctl enable --now bw-meter-distill.timer
 
 dev:  ## Install with dev dependencies (editable)
 	PIP_BREAK_SYSTEM_PACKAGES=1 pip install -e ".[dev]"
