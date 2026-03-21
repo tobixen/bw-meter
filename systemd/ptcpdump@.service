@@ -10,14 +10,14 @@ BindsTo=sys-subsystem-net-devices-%i.device
 Type=simple
 # Create capture directory if it does not yet exist
 ExecStartPre=/usr/bin/install -d -m 750 /var/lib/bw-meter/%I
-# Rotate every 15 minutes (-G 900); filename encodes the start timestamp.
-# Adjust /usr/bin/ptcpdump to the actual installation path if needed.
-ExecStart=/usr/bin/ptcpdump \
-    -i %I \
-    -G 900 \
-    -w /var/lib/bw-meter/%I/capture-%%Y%%m%%dT%%H%%M%%S.pcapng
-Restart=on-failure
-RestartSec=10
+# Write to a timestamped file; RuntimeMaxSec kills and restarts every 15 min
+# so each run gets a fresh filename.
+# Note: %%Y etc. — double-% to pass a literal % through systemd specifier expansion.
+# Adjust the ptcpdump path if it is not at /usr/bin/ptcpdump.
+ExecStart=/bin/sh -c 'exec /usr/bin/ptcpdump -i %I -w /var/lib/bw-meter/%I/capture-$(date +%%Y%%m%%dT%%H%%M%%S).pcapng'
+RuntimeMaxSec=900
+Restart=always
+RestartSec=2
 
 [Install]
 WantedBy=multi-user.target
