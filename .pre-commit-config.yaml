@@ -1,0 +1,44 @@
+repos:
+  # === PRE-COMMIT STAGE ===
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.6
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+
+  # === PRE-PUSH STAGE ===
+
+  - repo: local
+    hooks:
+      - id: pytest
+        name: pytest
+        entry: pytest
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+
+  - repo: https://github.com/lycheeverse/lychee
+    rev: lychee-v0.23.0
+    hooks:
+      - id: lychee
+        args: ["--no-progress", "--timeout", "10", "--cache", "--max-cache-age", "1d", "."]
+        stages: [pre-push]
+
+  # === COMMIT-MSG STAGE ===
+
+  - repo: https://github.com/compilerla/conventional-pre-commit
+    rev: v3.4.0
+    hooks:
+      - id: conventional-pre-commit
+        stages: [commit-msg]

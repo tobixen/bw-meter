@@ -1,0 +1,72 @@
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bw-meter"
+dynamic = ["version"]
+description = "CLI tool for digging into accumulated bandwidth statistics from ptcpdump captures"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "GPL-3.0-or-later"}
+authors = [{ name = "Tobias Brox", email = "tobias@tobixen.no" }]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: End Users/Desktop",
+  "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: System :: Networking :: Monitoring",
+]
+keywords = ["bandwidth", "metering", "ptcpdump", "pcapng", "network"]
+dependencies = [
+    "dateparser>=1.2",
+    "argcomplete>=3.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.14", "pre-commit>=4.0"]
+
+[project.scripts]
+bw-meter = "bw_meter.cli:main"
+
+[project.urls]
+Repository = "https://github.com/tobixen/bw-meter"
+Issues = "https://github.com/tobixen/bw-meter/issues"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/bw_meter/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bw_meter"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+exclude = ["src/bw_meter/_version.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "PT"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["bw_meter"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+filterwarnings = [
+    "error",
+    # dateparser uses strptime without year for relative day names; upstream issue
+    # See: https://github.com/scrapinghub/dateparser/issues/1015
+    "ignore:Parsing dates involving a day of month without a year:DeprecationWarning",
+]
