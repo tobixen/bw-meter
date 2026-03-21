@@ -8,3 +8,4 @@ build/
 .venv/
 *.egg
 .lycheecache
+src/bw_meter/_version.py
