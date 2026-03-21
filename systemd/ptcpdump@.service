@@ -1,0 +1,23 @@
+[Unit]
+Description=ptcpdump packet capture on %I
+Documentation=https://github.com/tobixen/bw-meter
+After=network.target
+# Start after the named interface appears
+After=sys-subsystem-net-devices-%i.device
+BindsTo=sys-subsystem-net-devices-%i.device
+
+[Service]
+Type=simple
+# Create capture directory if it does not yet exist
+ExecStartPre=/usr/bin/install -d -m 750 /var/lib/bw-meter/%I
+# Rotate every 15 minutes (-G 900); filename encodes the start timestamp.
+# Adjust /usr/bin/ptcpdump to the actual installation path if needed.
+ExecStart=/usr/bin/ptcpdump \
+    -i %I \
+    -G 900 \
+    -w /var/lib/bw-meter/%I/capture-%%Y%%m%%dT%%H%%M%%S.pcapng
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

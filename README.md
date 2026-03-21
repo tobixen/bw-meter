@@ -19,4 +19,10 @@ I did have a look through existing systems a while ago, and found many network m
 
 ## Design
 
-See the [DESIGN.md](DESIGN.md) file
+* A **Collector** -- ptcpdump -- is run from systemd, collecting pcaps on the device(s) that should be monitored
+* A **Distiller** is run from systemd timer, it's a python/tshark-combo will read from the pcaps, store statistics in a database and delete the old pcaps.
+* The **CLI** can query the database and make reports.
+
+This is a modular design, it could be possible to present the data in a GUI or a WebUI as well.  Pull requests are welcome.
+
+See the [DESIGN.md](DESIGN.md) file for architecture details, and [INSTALL.md](INSTALL.md) for installation and systemd setup.

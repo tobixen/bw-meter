@@ -1,0 +1,10 @@
+[Unit]
+Description=bw-meter distiller — process pcapng captures into SQLite
+Documentation=https://github.com/tobixen/bw-meter
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/bw-meter distill
+# Run as root so it can read /var/lib/bw-meter/ and write to the system DB
+# (adjust User= here if you place the database somewhere user-writable)

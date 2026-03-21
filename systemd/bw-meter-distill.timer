@@ -1,0 +1,11 @@
+[Unit]
+Description=Run bw-meter distiller every 15 minutes
+Documentation=https://github.com/tobixen/bw-meter
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
