@@ -74,6 +74,19 @@ def _iface_filter(args: argparse.Namespace) -> tuple[str, list]:
     return "", []
 
 
+_SORT_COLS = {
+    "total": "total_bytes",
+    "in": "bytes_in",
+    "out": "bytes_out",
+    "packets": "total_packets",
+}
+
+
+def _sort_col(args: argparse.Namespace) -> str:
+    """Return the SQL column name to ORDER BY for the given --sort value."""
+    return _SORT_COLS.get(getattr(args, "sort", "total"), "total_bytes")
+
+
 def _port_filter(args: argparse.Namespace) -> tuple[str, list]:
     """Return an optional SQL WHERE fragment and its parameters for port filtering."""
     if getattr(args, "port", None) is not None:
@@ -107,6 +120,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     """Total bandwidth summary grouped by process."""
     since_ts, until_ts = _time_range(args)
     iface_sql, iface_params = _iface_filter(args)
+    order_col = _sort_col(args)
 
     conn = _open_conn(args)
     try:
@@ -123,7 +137,7 @@ def cmd_report(args: argparse.Namespace) -> int:
             WHERE t.ts >= ? AND t.ts < ?
             {iface_sql}
             GROUP BY COALESCE(p.name, '(kernel)')
-            ORDER BY total_bytes DESC
+            ORDER BY {order_col} DESC
             """,
             [since_ts, until_ts, *iface_params],
         ).fetchall()
@@ -159,6 +173,7 @@ def cmd_top(args: argparse.Namespace) -> int:
     iface_sql, iface_params = _iface_filter(args)
     limit = args.limit
     by = args.by
+    order_col = _sort_col(args)
 
     conn = _open_conn(args)
     try:
@@ -167,6 +182,8 @@ def cmd_top(args: argparse.Namespace) -> int:
                 f"""
                 SELECT
                     COALESCE(p.name, '(kernel)') AS process,
+                    SUM(CASE WHEN t.direction='in'  THEN t.bytes ELSE 0 END) AS bytes_in,
+                    SUM(CASE WHEN t.direction='out' THEN t.bytes ELSE 0 END) AS bytes_out,
                     SUM(t.bytes) AS total_bytes,
                     SUM(t.packets) AS total_packets
                 FROM traffic t
@@ -174,15 +191,15 @@ def cmd_top(args: argparse.Namespace) -> int:
                 WHERE t.ts >= ? AND t.ts < ?
                 {iface_sql}
                 GROUP BY COALESCE(p.name, '(kernel)')
-                ORDER BY total_bytes DESC
+                ORDER BY {order_col} DESC
                 LIMIT ?
                 """,
                 [since_ts, until_ts, *iface_params, limit],
             ).fetchall()
             headers = ["#", "Process", "Total", "Packets"]
-            data_rows = [[i + 1, r[0], _format_bytes(r[1]), r[2]] for i, r in enumerate(rows)]
+            data_rows = [[i + 1, r[0], _format_bytes(r[3]), r[4]] for i, r in enumerate(rows)]
             json_rows = [
-                {"rank": i + 1, "process": r[0], "total_bytes": r[1], "total_packets": r[2]} for i, r in enumerate(rows)
+                {"rank": i + 1, "process": r[0], "total_bytes": r[3], "total_packets": r[4]} for i, r in enumerate(rows)
             ]
 
         elif by == "host":
@@ -190,6 +207,8 @@ def cmd_top(args: argparse.Namespace) -> int:
                 f"""
                 SELECT
                     COALESCE(h.hostname, h.ip, '(unknown)') AS host,
+                    SUM(CASE WHEN t.direction='in'  THEN t.bytes ELSE 0 END) AS bytes_in,
+                    SUM(CASE WHEN t.direction='out' THEN t.bytes ELSE 0 END) AS bytes_out,
                     SUM(t.bytes) AS total_bytes,
                     SUM(t.packets) AS total_packets
                 FROM traffic t
@@ -197,15 +216,15 @@ def cmd_top(args: argparse.Namespace) -> int:
                 WHERE t.ts >= ? AND t.ts < ?
                 {iface_sql}
                 GROUP BY COALESCE(h.hostname, h.ip, '(unknown)')
-                ORDER BY total_bytes DESC
+                ORDER BY {order_col} DESC
                 LIMIT ?
                 """,
                 [since_ts, until_ts, *iface_params, limit],
             ).fetchall()
             headers = ["#", "Host", "Total", "Packets"]
-            data_rows = [[i + 1, r[0], _format_bytes(r[1]), r[2]] for i, r in enumerate(rows)]
+            data_rows = [[i + 1, r[0], _format_bytes(r[3]), r[4]] for i, r in enumerate(rows)]
             json_rows = [
-                {"rank": i + 1, "host": r[0], "total_bytes": r[1], "total_packets": r[2]} for i, r in enumerate(rows)
+                {"rank": i + 1, "host": r[0], "total_bytes": r[3], "total_packets": r[4]} for i, r in enumerate(rows)
             ]
 
         else:  # process+host
@@ -214,6 +233,8 @@ def cmd_top(args: argparse.Namespace) -> int:
                 SELECT
                     COALESCE(p.name, '(kernel)') AS process,
                     COALESCE(h.hostname, h.ip, '(unknown)') AS host,
+                    SUM(CASE WHEN t.direction='in'  THEN t.bytes ELSE 0 END) AS bytes_in,
+                    SUM(CASE WHEN t.direction='out' THEN t.bytes ELSE 0 END) AS bytes_out,
                     SUM(t.bytes) AS total_bytes,
                     SUM(t.packets) AS total_packets
                 FROM traffic t
@@ -222,20 +243,20 @@ def cmd_top(args: argparse.Namespace) -> int:
                 WHERE t.ts >= ? AND t.ts < ?
                 {iface_sql}
                 GROUP BY COALESCE(p.name, '(kernel)'), COALESCE(h.hostname, h.ip, '(unknown)')
-                ORDER BY total_bytes DESC
+                ORDER BY {order_col} DESC
                 LIMIT ?
                 """,
                 [since_ts, until_ts, *iface_params, limit],
             ).fetchall()
             headers = ["#", "Process", "Host", "Total", "Packets"]
-            data_rows = [[i + 1, r[0], r[1], _format_bytes(r[2]), r[3]] for i, r in enumerate(rows)]
+            data_rows = [[i + 1, r[0], r[1], _format_bytes(r[4]), r[5]] for i, r in enumerate(rows)]
             json_rows = [
                 {
                     "rank": i + 1,
                     "process": r[0],
                     "host": r[1],
-                    "total_bytes": r[2],
-                    "total_packets": r[3],
+                    "total_bytes": r[4],
+                    "total_packets": r[5],
                 }
                 for i, r in enumerate(rows)
             ]
@@ -331,6 +352,7 @@ def cmd_hosts(args: argparse.Namespace) -> int:
     since_ts, until_ts = _time_range(args)
     iface_sql, iface_params = _iface_filter(args)
     port_sql, port_params = _port_filter(args)
+    order_col = _sort_col(args)
 
     if args.process is None:
         proc_join = ""
@@ -363,7 +385,7 @@ def cmd_hosts(args: argparse.Namespace) -> int:
             {iface_sql}
             {port_sql}
             GROUP BY COALESCE(h.hostname, h.ip, '(unknown)')
-            ORDER BY total_bytes DESC
+            ORDER BY {order_col} DESC
             """,
             [since_ts, until_ts, *proc_params, *iface_params, *port_params],
         ).fetchall()
@@ -398,6 +420,7 @@ def cmd_processes(args: argparse.Namespace) -> int:
     since_ts, until_ts = _time_range(args)
     iface_sql, iface_params = _iface_filter(args)
     port_sql, port_params = _port_filter(args)
+    order_col = _sort_col(args)
 
     conn = _open_conn(args)
     try:
@@ -417,7 +440,7 @@ def cmd_processes(args: argparse.Namespace) -> int:
             {iface_sql}
             {port_sql}
             GROUP BY COALESCE(p.name, '(kernel)')
-            ORDER BY total_bytes DESC
+            ORDER BY {order_col} DESC
             """,
             [since_ts, until_ts, args.host, args.host, *iface_params, *port_params],
         ).fetchall()
@@ -451,6 +474,7 @@ def cmd_ports(args: argparse.Namespace) -> int:
     """List the remote ports used, optionally filtered by process and/or host."""
     since_ts, until_ts = _time_range(args)
     iface_sql, iface_params = _iface_filter(args)
+    order_col = _sort_col(args)
 
     extra_joins = ""
     extra_where = ""
@@ -488,7 +512,7 @@ def cmd_ports(args: argparse.Namespace) -> int:
             {iface_sql}
             {extra_where}
             GROUP BY t.remote_port
-            ORDER BY total_bytes DESC
+            ORDER BY {order_col} DESC
             """,
             [since_ts, until_ts, *iface_params, *extra_params],
         ).fetchall()
@@ -548,6 +572,16 @@ def add_time_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_sort_arg(parser: argparse.ArgumentParser) -> None:
+    """Add --sort to a subparser."""
+    parser.add_argument(
+        "--sort",
+        choices=["total", "in", "out", "packets"],
+        default="total",
+        help="Sort order (default: total)",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bw-meter",
@@ -595,6 +629,7 @@ def build_parser() -> argparse.ArgumentParser:
     # report
     p_report = sub.add_parser("report", help="Total bandwidth spending summary")
     add_time_args(p_report)
+    add_sort_arg(p_report)
     p_report.set_defaults(func=cmd_report)
 
     # top
@@ -607,6 +642,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Grouping dimension (default: process)",
     )
     p_top.add_argument("--limit", "-n", type=int, default=20, metavar="N")
+    add_sort_arg(p_top)
     p_top.set_defaults(func=cmd_top)
 
     # timeline
@@ -630,6 +666,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--process", metavar="NAME", help="Filter to a specific process name (use '(kernel)' for untagged traffic)"
     )
     p_hosts.add_argument("--port", metavar="PORT", type=int, help="Restrict to a specific remote port")
+    add_sort_arg(p_hosts)
     p_hosts.set_defaults(func=cmd_hosts)
 
     # processes
@@ -637,6 +674,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_time_args(p_procs)
     p_procs.add_argument("--host", metavar="HOSTNAME", required=True, help="Hostname or IP address")
     p_procs.add_argument("--port", metavar="PORT", type=int, help="Restrict to a specific remote port")
+    add_sort_arg(p_procs)
     p_procs.set_defaults(func=cmd_processes)
 
     # ports
@@ -646,6 +684,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--process", metavar="NAME", help="Filter to a specific process name (use '(kernel)' for untagged traffic)"
     )
     p_ports.add_argument("--host", metavar="HOSTNAME", help="Filter to a specific hostname or IP")
+    add_sort_arg(p_ports)
     p_ports.set_defaults(func=cmd_ports)
 
     return parser

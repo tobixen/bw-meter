@@ -174,6 +174,7 @@ def _args(**kwargs) -> argparse.Namespace:
         "since": "2024-01-01",
         "until": "2025-01-01",
         "json": False,
+        "sort": "total",
     }
     defaults.update(kwargs)
     return argparse.Namespace(**defaults)
@@ -227,6 +228,23 @@ class TestParseInterval:
 
 
 class TestCmdReport:
+    def test_sort_by_out_changes_order(self, db_path, capsys):
+        # On all interfaces: curl has more out (1000+200+100+9999=11299) than firefox (2000).
+        # Default (total) ranks firefox first; sort=out should rank curl first.
+        args = _args(db=db_path, sort="total")
+        cmd_report(args)
+        default_out = capsys.readouterr().out
+        args = _args(db=db_path, sort="out")
+        cmd_report(args)
+        sorted_out = capsys.readouterr().out
+        assert default_out.index("firefox") < default_out.index("curl")
+        assert sorted_out.index("curl") < sorted_out.index("firefox")
+
+    def test_sort_by_packets(self, db_path, capsys):
+        args = _args(db=db_path, sort="packets")
+        rc = cmd_report(args)
+        assert rc == 0
+
     def test_shows_process_names(self, db_path, capsys):
         args = _args(db=db_path)
         rc = cmd_report(args)
@@ -272,6 +290,12 @@ class TestCmdReport:
 
 
 class TestCmdTop:
+    def test_sort_by_out_changes_order(self, db_path, capsys):
+        args = _args(db=db_path, by="process", limit=10, sort="out")
+        cmd_top(args)
+        out = capsys.readouterr().out
+        assert out.index("curl") < out.index("firefox")
+
     def test_by_process(self, db_path, capsys):
         args = _args(db=db_path, by="process", limit=10)
         rc = cmd_top(args)
@@ -382,6 +406,14 @@ class TestCmdHosts:
         assert isinstance(data, list)
         assert any("dns.google" in str(row.get("host", "")) for row in data)
 
+    def test_sort_by_out_changes_order(self, db_path, capsys):
+        # dns.google has more out (1000+500+9999=11499) than example.com (2000+300=2300)
+        # default (total) ranks example.com first; sort=out should rank dns.google first
+        args = _args(db=db_path, process=None, sort="out")
+        cmd_hosts(args)
+        out = capsys.readouterr().out
+        assert out.index("dns.google") < out.index("example.com")
+
     def test_no_process_shows_all_hosts(self, db_path, capsys):
         args = _args(db=db_path, process=None)
         rc = cmd_hosts(args)
@@ -436,6 +468,11 @@ class TestCmdProcesses:
         assert isinstance(data, list)
         assert any(row.get("process") == "firefox" for row in data)
 
+    def test_sort_by_in(self, db_path, capsys):
+        args = _args(db=db_path, host="dns.google", sort="in")
+        rc = cmd_processes(args)
+        assert rc == 0
+
     def test_port_filter(self, db_path, capsys):
         # example.com has curl traffic on port 443 and 80; port=80 should not include firefox
         args = _args(db=db_path, host="example.com", port=80)
@@ -473,6 +510,11 @@ class TestCmdPorts:
         out = capsys.readouterr().out
         assert "443" in out
         assert "80" in out
+
+    def test_sort_by_packets(self, db_path, capsys):
+        args = _args(db=db_path, process="curl", host=None, sort="packets")
+        rc = cmd_ports(args)
+        assert rc == 0
 
     def test_ports_global(self, db_path, capsys):
         args = _args(db=db_path, process=None, host=None)
