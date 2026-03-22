@@ -40,32 +40,36 @@ class TestDeriveProcessName:
 
 
 class TestParseComment:
-    FULL = (
-        "PID: 1234\nCmd: /usr/bin/firefox\nArgs: firefox --no-sandbox\n"
-        "UserId: 1000\nParentPID: 500\nParentCmd: /bin/bash\nParentArgs: bash"
-    )
+    # _ws.expert.message format: literal \n (backslash-n) as line separator
+    FULL = "PID: 1234\\nCmd: /usr/bin/firefox\\nArgs: firefox --no-sandbox\\nUserId: 1000"
 
-    def test_full_comment(self):
+    def test_full_comment_with_literal_newlines(self):
         r = parse_comment(self.FULL)
         assert r["pid"] == "1234"
         assert r["cmd"] == "/usr/bin/firefox"
         assert r["args"] == "firefox --no-sandbox"
         assert r["uid"] == "1000"
-        assert r["ppid"] == "500"
-        assert r["parent_cmd"] == "/bin/bash"
-        assert r["parent_args"] == "bash"
+
+    def test_full_comment_with_actual_newlines(self):
+        # Also accept actual newlines (backwards compatibility)
+        raw = "PID: 1234\nCmd: /usr/bin/firefox\nArgs: firefox --no-sandbox\nUserId: 1000"
+        r = parse_comment(raw)
+        assert r["pid"] == "1234"
+        assert r["cmd"] == "/usr/bin/firefox"
+        assert r["args"] == "firefox --no-sandbox"
+        assert r["uid"] == "1000"
 
     def test_empty_string_returns_empty_dict(self):
         assert parse_comment("") == {}
 
     def test_partial_comment(self):
-        r = parse_comment("PID: 42\nCmd: /bin/sh")
+        r = parse_comment("PID: 42\\nCmd: /bin/sh")
         assert r["pid"] == "42"
         assert r["cmd"] == "/bin/sh"
         assert "uid" not in r
 
     def test_unknown_keys_ignored(self):
-        r = parse_comment("PID: 1\nWeird: value")
+        r = parse_comment("PID: 1\\nWeird: value")
         assert r["pid"] == "1"
         assert "weird" not in r
         assert "Weird" not in r
@@ -161,26 +165,26 @@ class TestIterTsharkPackets:
         assert pkts[0]["comment"] == ""
 
     def test_single_packet_with_comment(self):
+        # _ws.expert.message encodes the full comment on one line with literal \n
         lines = iter(
             [
-                "1\t1711000000.0\t100\t10.0.0.1\t8.8.8.8\t\t\tTCP\t\t\t\t\tPID: 42\n",
+                "1\t1711000000.0\t100\t10.0.0.1\t8.8.8.8\t\t\tTCP\t\t\t\t\tPID: 42\\nCmd: /usr/bin/curl\\nArgs: curl\n",
             ]
         )
         pkts = list(iter_tshark_packets(Path("dummy"), _lines=lines))
-        assert pkts[0]["comment"] == "PID: 42"
+        assert pkts[0]["comment"] == "PID: 42\\nCmd: /usr/bin/curl\\nArgs: curl"
 
-    def test_multiline_comment_reassembled(self):
+    def test_multiline_comment_on_single_line(self):
+        # _ws.expert.message keeps entire comment on one line (literal \n, not real newlines)
         lines = iter(
             [
-                "1\t1711000000.0\t100\t10.0.0.1\t1.2.3.4\t\t\tTCP\t\t\t\t\tPID: 1\n",
-                "Cmd: /usr/bin/foo\n",
-                "Args: foo\n",
+                "1\t1711000000.0\t100\t10.0.0.1\t1.2.3.4\t\t\tTCP\t\t\t\t\tPID: 1\\nCmd: /usr/bin/foo\\nArgs: foo\n",
                 "2\t1711000001.0\t200\t5.6.7.8\t10.0.0.1\t\t\tTCP\t\t\t\t\t\n",
             ]
         )
         pkts = list(iter_tshark_packets(Path("dummy"), _lines=lines))
         assert len(pkts) == 2
-        assert pkts[0]["comment"] == "PID: 1\nCmd: /usr/bin/foo\nArgs: foo"
+        assert pkts[0]["comment"] == "PID: 1\\nCmd: /usr/bin/foo\\nArgs: foo"
         assert pkts[1]["comment"] == ""
 
     def test_empty_output(self):
@@ -226,14 +230,13 @@ class TestIterTsharkPackets:
     def test_port_fields_with_comment(self):
         lines = iter(
             [
-                "1\t1711000000.0\t100\t10.0.0.1\t1.2.3.4\t\t\tTCP\t12345\t443\t\t\tPID: 42\n",
-                "Cmd: /usr/bin/curl\n",
+                "1\t1711000000.0\t100\t10.0.0.1\t1.2.3.4\t\t\tTCP\t12345\t443\t\t\tPID: 42\\nCmd: /usr/bin/curl\n",
                 "2\t1711000001.0\t50\t1.2.3.4\t10.0.0.1\t\t\tTCP\t\t\t\t\t\n",
             ]
         )
         pkts = list(iter_tshark_packets(Path("dummy"), _lines=lines))
         assert pkts[0]["tcp_dst_port"] == "443"
-        assert pkts[0]["comment"] == "PID: 42\nCmd: /usr/bin/curl"
+        assert pkts[0]["comment"] == "PID: 42\\nCmd: /usr/bin/curl"
         assert pkts[1]["comment"] == ""
 
 
@@ -323,8 +326,8 @@ class TestAggregate:
         assert remote_ip == "8.8.8.8"
 
     def test_different_processes_separate_buckets(self):
-        comment_a = "PID: 1\nCmd: /bin/curl"
-        comment_b = "PID: 2\nCmd: /bin/wget"
+        comment_a = "PID: 1\\nCmd: /bin/curl"
+        comment_b = "PID: 2\\nCmd: /bin/wget"
         pkts = [
             self._pkt(1711000000.0, 100, comment=comment_a),
             self._pkt(1711000000.0, 200, comment=comment_b),

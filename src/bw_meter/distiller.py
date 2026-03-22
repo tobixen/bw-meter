@@ -65,11 +65,18 @@ def parse_comment(raw: str) -> dict[str, str]:
 
     Keys: pid, cmd, args, uid, ppid, parent_cmd, parent_args.
     Unknown keys are silently ignored.
+
+    Tshark's _ws.expert.message encodes embedded newlines as literal \\n
+    (two characters: backslash + n).  Actual newlines (from frame.comment
+    continuation lines) are also accepted.
     """
     if not raw:
         return {}
+    # Normalise: replace literal \n (backslash-n from _ws.expert.message) with
+    # actual newlines, then split.  Actual newlines pass through unchanged.
+    normalized = raw.replace("\\n", "\n")
     result: dict[str, str] = {}
-    for line in raw.splitlines():
+    for line in normalized.splitlines():
         if ": " in line:
             key, _, value = line.partition(": ")
             mapped = _COMMENT_KEYS.get(key.strip())
@@ -194,7 +201,7 @@ def _iter_tshark_lines(pcapng_path: Path) -> Iterator[str]:
             "-e",
             "udp.dstport",
             "-e",
-            "frame.comment",
+            "_ws.expert.message",
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
@@ -215,7 +222,10 @@ def iter_tshark_packets(
 ) -> Iterator[dict[str, str]]:
     """Yield one dict per packet from *pcapng_path* via tshark.
 
-    Each dict has keys: num, ts, len, src4, dst4, src6, dst6, protocol, comment.
+    Each dict has keys: num, ts, len, src4, dst4, src6, dst6, protocol,
+    tcp_src_port, tcp_dst_port, udp_src_port, udp_dst_port, comment.
+    The comment field comes from _ws.expert.message (ptcpdump process metadata),
+    with embedded newlines represented as literal \\n.
     The *_lines* parameter is used in tests to inject mock tshark output.
     """
     lines = _lines if _lines is not None else _iter_tshark_lines(pcapng_path)
