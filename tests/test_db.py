@@ -30,6 +30,33 @@ class TestEnsureSchema:
     def test_idempotent(self, conn):
         ensure_schema(conn)  # second call must not raise
 
+    def test_traffic_has_remote_port_column(self, conn):
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(traffic)")}
+        assert "remote_port" in cols
+
+    def test_migration_adds_remote_port_to_existing_db(self):
+        """ensure_schema must add remote_port even when traffic was created without it."""
+        c = sqlite3.connect(":memory:")
+        # Create traffic table without remote_port (simulates old database)
+        c.execute(
+            """CREATE TABLE traffic (
+                id INTEGER PRIMARY KEY,
+                ts INTEGER NOT NULL,
+                bucket_secs INTEGER NOT NULL,
+                interface TEXT NOT NULL,
+                process_id INTEGER,
+                host_id INTEGER,
+                direction TEXT NOT NULL,
+                protocol TEXT,
+                bytes INTEGER NOT NULL,
+                packets INTEGER NOT NULL
+            )"""
+        )
+        ensure_schema(c)
+        cols = {row[1] for row in c.execute("PRAGMA table_info(traffic)")}
+        assert "remote_port" in cols
+        c.close()
+
 
 class TestUpsertProcess:
     def test_inserts_and_returns_id(self, conn):

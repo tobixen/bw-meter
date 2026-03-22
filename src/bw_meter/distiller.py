@@ -186,6 +186,14 @@ def _iter_tshark_lines(pcapng_path: Path) -> Iterator[str]:
             "-e",
             "_ws.col.Protocol",
             "-e",
+            "tcp.srcport",
+            "-e",
+            "tcp.dstport",
+            "-e",
+            "udp.srcport",
+            "-e",
+            "udp.dstport",
+            "-e",
             "frame.comment",
         ],
         stdout=subprocess.PIPE,
@@ -218,7 +226,7 @@ def iter_tshark_packets(
         if _FRAME_NUM_RE.match(line):
             if current is not None:
                 yield current
-            parts = line.split("\t", 8)
+            parts = line.split("\t", 12)
             current = {
                 "num": parts[0] if len(parts) > 0 else "",
                 "ts": parts[1] if len(parts) > 1 else "",
@@ -228,7 +236,11 @@ def iter_tshark_packets(
                 "src6": parts[5] if len(parts) > 5 else "",
                 "dst6": parts[6] if len(parts) > 6 else "",
                 "protocol": parts[7] if len(parts) > 7 else "",
-                "comment": parts[8] if len(parts) > 8 else "",
+                "tcp_src_port": parts[8] if len(parts) > 8 else "",
+                "tcp_dst_port": parts[9] if len(parts) > 9 else "",
+                "udp_src_port": parts[10] if len(parts) > 10 else "",
+                "udp_dst_port": parts[11] if len(parts) > 11 else "",
+                "comment": parts[12] if len(parts) > 12 else "",
             }
         elif current is not None:
             # Continuation line: belongs to multi-line frame.comment
@@ -293,7 +305,7 @@ def _aggregate(
 ) -> dict[tuple, dict]:
     """Aggregate an iterator of packet dicts into time buckets.
 
-    Returns a dict keyed by (bucket_ts, iface, direction, remote_ip, protocol, comment).
+    Returns a dict keyed by (bucket_ts, iface, direction, remote_ip, protocol, comment, remote_port).
     Each value is {"bytes": int, "packets": int}.
     """
     buckets: dict[tuple, dict] = defaultdict(lambda: {"bytes": 0, "packets": 0})
@@ -319,7 +331,13 @@ def _aggregate(
         comment = pkt.get("comment", "")
         bucket_ts = int(ts // bucket_secs) * bucket_secs
 
-        key = (bucket_ts, iface, direction, remote_ip, protocol, comment)
+        if direction == "out":
+            port_str = pkt.get("tcp_dst_port", "") or pkt.get("udp_dst_port", "")
+        else:
+            port_str = pkt.get("tcp_src_port", "") or pkt.get("udp_src_port", "")
+        remote_port = int(port_str.strip()) if port_str.strip().isdigit() else None
+
+        key = (bucket_ts, iface, direction, remote_ip, protocol, comment, remote_port)
         buckets[key]["bytes"] += length
         buckets[key]["packets"] += 1
 
@@ -339,7 +357,7 @@ def distill_file(
     buckets = _aggregate(packets, hostname_map, local_ips, iface, bucket_secs)
 
     traffic_rows: list[dict] = []
-    for (bucket_ts, iface_, direction, remote_ip, protocol, comment), counts in buckets.items():
+    for (bucket_ts, iface_, direction, remote_ip, protocol, comment, remote_port), counts in buckets.items():
         host_id = upsert_host(conn, remote_ip, hostname_map.get(remote_ip)) if remote_ip else None
 
         process_id: int | None = None
@@ -368,6 +386,7 @@ def distill_file(
                 "protocol": protocol,
                 "bytes": counts["bytes"],
                 "packets": counts["packets"],
+                "remote_port": remote_port,
             }
         )
 

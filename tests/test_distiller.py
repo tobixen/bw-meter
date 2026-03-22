@@ -147,7 +147,7 @@ class TestIterTsharkPackets:
     def test_single_packet_no_comment(self):
         lines = iter(
             [
-                "1\t1711000000.0\t1500\t192.168.1.1\t8.8.8.8\t\t\tTCP\t\n",
+                "1\t1711000000.0\t1500\t192.168.1.1\t8.8.8.8\t\t\tTCP\t\t\t\t\t\n",
             ]
         )
         pkts = list(iter_tshark_packets(Path("dummy"), _lines=lines))
@@ -163,7 +163,7 @@ class TestIterTsharkPackets:
     def test_single_packet_with_comment(self):
         lines = iter(
             [
-                "1\t1711000000.0\t100\t10.0.0.1\t8.8.8.8\t\t\tTCP\tPID: 42\n",
+                "1\t1711000000.0\t100\t10.0.0.1\t8.8.8.8\t\t\tTCP\t\t\t\t\tPID: 42\n",
             ]
         )
         pkts = list(iter_tshark_packets(Path("dummy"), _lines=lines))
@@ -172,10 +172,10 @@ class TestIterTsharkPackets:
     def test_multiline_comment_reassembled(self):
         lines = iter(
             [
-                "1\t1711000000.0\t100\t10.0.0.1\t1.2.3.4\t\t\tTCP\tPID: 1\n",
+                "1\t1711000000.0\t100\t10.0.0.1\t1.2.3.4\t\t\tTCP\t\t\t\t\tPID: 1\n",
                 "Cmd: /usr/bin/foo\n",
                 "Args: foo\n",
-                "2\t1711000001.0\t200\t5.6.7.8\t10.0.0.1\t\t\tTCP\t\n",
+                "2\t1711000001.0\t200\t5.6.7.8\t10.0.0.1\t\t\tTCP\t\t\t\t\t\n",
             ]
         )
         pkts = list(iter_tshark_packets(Path("dummy"), _lines=lines))
@@ -190,7 +190,7 @@ class TestIterTsharkPackets:
     def test_ipv6_fields(self):
         lines = iter(
             [
-                "1\t1711000000.0\t80\t\t\t::1\t2001:db8::1\tTCP\t\n",
+                "1\t1711000000.0\t80\t\t\t::1\t2001:db8::1\tTCP\t\t\t\t\t\n",
             ]
         )
         pkts = list(iter_tshark_packets(Path("dummy"), _lines=lines))
@@ -198,11 +198,63 @@ class TestIterTsharkPackets:
         assert pkts[0]["dst6"] == "2001:db8::1"
         assert pkts[0]["src4"] == ""
 
+    def test_tcp_port_fields(self):
+        # src4, dst4, src6, dst6, protocol, tcp_src, tcp_dst, udp_src, udp_dst, comment
+        lines = iter(
+            [
+                "1\t1711000000.0\t100\t10.0.0.1\t93.184.216.34\t\t\tTCP\t54321\t443\t\t\t\n",
+            ]
+        )
+        pkts = list(iter_tshark_packets(Path("dummy"), _lines=lines))
+        assert pkts[0]["tcp_src_port"] == "54321"
+        assert pkts[0]["tcp_dst_port"] == "443"
+        assert pkts[0]["udp_src_port"] == ""
+        assert pkts[0]["udp_dst_port"] == ""
+        assert pkts[0]["comment"] == ""
+
+    def test_udp_port_fields(self):
+        lines = iter(
+            [
+                "1\t1711000000.0\t60\t10.0.0.1\t8.8.8.8\t\t\tUDP\t\t\t54321\t53\t\n",
+            ]
+        )
+        pkts = list(iter_tshark_packets(Path("dummy"), _lines=lines))
+        assert pkts[0]["tcp_src_port"] == ""
+        assert pkts[0]["udp_src_port"] == "54321"
+        assert pkts[0]["udp_dst_port"] == "53"
+
+    def test_port_fields_with_comment(self):
+        lines = iter(
+            [
+                "1\t1711000000.0\t100\t10.0.0.1\t1.2.3.4\t\t\tTCP\t12345\t443\t\t\tPID: 42\n",
+                "Cmd: /usr/bin/curl\n",
+                "2\t1711000001.0\t50\t1.2.3.4\t10.0.0.1\t\t\tTCP\t\t\t\t\t\n",
+            ]
+        )
+        pkts = list(iter_tshark_packets(Path("dummy"), _lines=lines))
+        assert pkts[0]["tcp_dst_port"] == "443"
+        assert pkts[0]["comment"] == "PID: 42\nCmd: /usr/bin/curl"
+        assert pkts[1]["comment"] == ""
+
 
 class TestAggregate:
     LOCAL = {"10.0.0.1"}
 
-    def _pkt(self, ts, length, src4="10.0.0.1", dst4="8.8.8.8", src6="", dst6="", comment="", protocol="TCP"):
+    def _pkt(
+        self,
+        ts,
+        length,
+        src4="10.0.0.1",
+        dst4="8.8.8.8",
+        src6="",
+        dst6="",
+        comment="",
+        protocol="TCP",
+        tcp_src_port="",
+        tcp_dst_port="",
+        udp_src_port="",
+        udp_dst_port="",
+    ):
         return {
             "ts": str(ts),
             "len": str(length),
@@ -212,6 +264,10 @@ class TestAggregate:
             "dst6": dst6,
             "protocol": protocol,
             "comment": comment,
+            "tcp_src_port": tcp_src_port,
+            "tcp_dst_port": tcp_dst_port,
+            "udp_src_port": udp_src_port,
+            "udp_dst_port": udp_dst_port,
         }
 
     def test_single_outbound_packet(self):
@@ -219,7 +275,7 @@ class TestAggregate:
         result = _aggregate(iter([pkt]), {}, self.LOCAL, "wlan0", bucket_secs=60)
         assert len(result) == 1
         key = next(iter(result))
-        _, iface, direction, remote_ip, protocol, _ = key
+        _, iface, direction, remote_ip, protocol, _, _ = key
         assert direction == "out"
         assert remote_ip == "8.8.8.8"
         assert iface == "wlan0"
@@ -262,7 +318,7 @@ class TestAggregate:
         pkt = self._pkt(1711000000.0, 500, src4="8.8.8.8", dst4="10.0.0.1")
         result = _aggregate(iter([pkt]), {}, self.LOCAL, "wlan0", bucket_secs=60)
         key = next(iter(result))
-        _, _, direction, remote_ip, _, _ = key
+        _, _, direction, remote_ip, _, _, _ = key
         assert direction == "in"
         assert remote_ip == "8.8.8.8"
 
@@ -281,6 +337,33 @@ class TestAggregate:
         pkt["ts"] = "not-a-number"
         result = _aggregate(iter([pkt]), {}, self.LOCAL, "wlan0")
         assert len(result) == 0
+
+    def test_outbound_remote_port_is_tcp_dst(self):
+        pkt = self._pkt(1711000000.0, 100, tcp_src_port="54321", tcp_dst_port="443")
+        result = _aggregate(iter([pkt]), {}, self.LOCAL, "wlan0", bucket_secs=60)
+        key = next(iter(result))
+        remote_port = key[6]
+        assert remote_port == 443
+
+    def test_inbound_remote_port_is_tcp_src(self):
+        # inbound: src=server, dst=local — server's port is src_port
+        pkt = self._pkt(1711000000.0, 100, src4="8.8.8.8", dst4="10.0.0.1", tcp_src_port="443", tcp_dst_port="54321")
+        result = _aggregate(iter([pkt]), {}, self.LOCAL, "wlan0", bucket_secs=60)
+        key = next(iter(result))
+        remote_port = key[6]
+        assert remote_port == 443
+
+    def test_outbound_remote_port_udp(self):
+        pkt = self._pkt(1711000000.0, 60, protocol="UDP", udp_src_port="54321", udp_dst_port="53")
+        result = _aggregate(iter([pkt]), {}, self.LOCAL, "wlan0", bucket_secs=60)
+        key = next(iter(result))
+        assert key[6] == 53
+
+    def test_no_port_protocol_has_none_remote_port(self):
+        pkt = self._pkt(1711000000.0, 60, protocol="ICMP")
+        result = _aggregate(iter([pkt]), {}, self.LOCAL, "wlan0", bucket_secs=60)
+        key = next(iter(result))
+        assert key[6] is None
 
 
 class TestFindDistillableFiles:

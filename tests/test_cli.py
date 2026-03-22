@@ -12,6 +12,7 @@ from bw_meter.cli import (
     _format_bytes,
     _parse_interval,
     cmd_hosts,
+    cmd_ports,
     cmd_processes,
     cmd_report,
     cmd_timeline,
@@ -106,17 +107,18 @@ def db_path(tmp_path):
                 "bytes": 30_000,
                 "packets": 200,
             },
-            # kernel/untagged traffic
+            # kernel/untagged traffic — to a known host so we can drill down
             {
                 "ts": BASE_TS,
                 "bucket_secs": 60,
                 "interface": "wlan0",
                 "process_id": None,
-                "host_id": None,
+                "host_id": host_google,
                 "direction": "out",
                 "protocol": "wireguard",
                 "bytes": 500,
                 "packets": 5,
+                "remote_port": None,
             },
             # traffic on a different interface (should be filterable)
             {
@@ -129,6 +131,33 @@ def db_path(tmp_path):
                 "protocol": "tcp",
                 "bytes": 9_999,
                 "packets": 99,
+                "remote_port": 443,
+            },
+            # curl → port 443 on example.com (for port filter tests)
+            {
+                "ts": BASE_TS + 60,
+                "bucket_secs": 60,
+                "interface": "wlan0",
+                "process_id": proc_curl,
+                "host_id": host_example,
+                "direction": "out",
+                "protocol": "tcp",
+                "bytes": 200,
+                "packets": 2,
+                "remote_port": 443,
+            },
+            # curl → port 80 (should be excluded by port=443 filter)
+            {
+                "ts": BASE_TS + 60,
+                "bucket_secs": 60,
+                "interface": "wlan0",
+                "process_id": proc_curl,
+                "host_id": host_example,
+                "direction": "out",
+                "protocol": "tcp",
+                "bytes": 100,
+                "packets": 1,
+                "remote_port": 80,
             },
         ],
     )
@@ -353,6 +382,24 @@ class TestCmdHosts:
         assert isinstance(data, list)
         assert any("dns.google" in str(row.get("host", "")) for row in data)
 
+    def test_kernel_process_shows_hosts(self, db_path, capsys):
+        args = _args(db=db_path, process="(kernel)")
+        rc = cmd_hosts(args)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "dns.google" in out
+
+    def test_port_filter(self, db_path, capsys):
+        # curl has traffic to example.com on ports 443 and 80; port=443 should exclude port 80
+        args = _args(db=db_path, process="curl", port=443)
+        rc = cmd_hosts(args)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "example.com" in out
+        # The 80-port row (100 bytes) should not bloat the total
+        data_lines = [ln for ln in out.splitlines() if "example.com" in ln]
+        assert data_lines
+
 
 # ---------------------------------------------------------------------------
 # cmd_processes
@@ -380,3 +427,56 @@ class TestCmdProcesses:
         data = json.loads(capsys.readouterr().out)
         assert isinstance(data, list)
         assert any(row.get("process") == "firefox" for row in data)
+
+    def test_port_filter(self, db_path, capsys):
+        # example.com has curl traffic on port 443 and 80; port=80 should not include firefox
+        args = _args(db=db_path, host="example.com", port=80)
+        rc = cmd_processes(args)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "curl" in out
+        assert "firefox" not in out
+
+
+# ---------------------------------------------------------------------------
+# cmd_ports
+# ---------------------------------------------------------------------------
+
+
+class TestCmdPorts:
+    def test_ports_for_process(self, db_path, capsys):
+        args = _args(db=db_path, process="curl", host=None)
+        rc = cmd_ports(args)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "443" in out
+
+    def test_ports_for_host(self, db_path, capsys):
+        args = _args(db=db_path, process=None, host="example.com")
+        rc = cmd_ports(args)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "443" in out
+
+    def test_ports_for_process_and_host(self, db_path, capsys):
+        args = _args(db=db_path, process="curl", host="example.com")
+        rc = cmd_ports(args)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "443" in out
+        assert "80" in out
+
+    def test_ports_global(self, db_path, capsys):
+        args = _args(db=db_path, process=None, host=None)
+        rc = cmd_ports(args)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Port" in out  # header
+
+    def test_json_output(self, db_path, capsys):
+        args = _args(db=db_path, process="curl", host=None, json=True)
+        rc = cmd_ports(args)
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert isinstance(data, list)
+        assert any(row.get("port") == 443 for row in data)

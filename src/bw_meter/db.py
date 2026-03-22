@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS traffic (
     direction   TEXT NOT NULL CHECK(direction IN ('in', 'out')),
     protocol    TEXT,
     bytes       INTEGER NOT NULL,
-    packets     INTEGER NOT NULL
+    packets     INTEGER NOT NULL,
+    remote_port INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS capture_file (
@@ -66,6 +67,11 @@ def open_db(path: Path | str | None = None) -> sqlite3.Connection:
 def ensure_schema(conn: sqlite3.Connection) -> None:
     """Create tables and indexes if they do not exist (idempotent)."""
     conn.executescript(_SCHEMA_SQL)
+    # Migration: add remote_port to traffic for databases created before this column existed.
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(traffic)")}
+    if "remote_port" not in cols:
+        conn.execute("ALTER TABLE traffic ADD COLUMN remote_port INTEGER")
+        conn.commit()
 
 
 def get_processed_files(conn: sqlite3.Connection) -> set[str]:
@@ -132,12 +138,13 @@ def insert_traffic_batch(conn: sqlite3.Connection, rows: list[dict]) -> None:
     """Bulk-insert traffic rows (does not commit)."""
     if not rows:
         return
+    normalized = [{**r, "remote_port": r.get("remote_port")} for r in rows]
     conn.executemany(
         """
         INSERT INTO traffic(ts, bucket_secs, interface, process_id, host_id,
-                            direction, protocol, bytes, packets)
+                            direction, protocol, bytes, packets, remote_port)
         VALUES (:ts, :bucket_secs, :interface, :process_id, :host_id,
-                :direction, :protocol, :bytes, :packets)
+                :direction, :protocol, :bytes, :packets, :remote_port)
         """,
-        rows,
+        normalized,
     )
