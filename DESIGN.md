@@ -197,31 +197,39 @@ should not need to remember which one this tool uses.
 
 ### Commands
 
-`report` — total spending summary over a time range:
+`report` — flexible query and report command:
 ```
 bw-meter report [--since DATE] [--until DATE] [--interface IFACE]
-```
-Shows total bytes by process, sorted descending.  Default range: current calendar month.
-
-`top` — ranked table (most useful for "what spent the most today"):
-```
-bw-meter top [--since DATE] [--until DATE] [--by process|host|process+host] [--limit N]
+                [--group-by DIMS] [--show COLS] [--sort COL]
+                [--limit N] [--interval DURATION]
+                [--process NAME] [--host HOSTNAME] [--port PORT]
 ```
 
-`timeline` — time-series view, for identifying when spikes happened:
-```
-bw-meter timeline [--since DATE] [--until DATE] [--interval 5m]
-                  [--process NAME] [--host HOSTNAME]
-```
+`--group-by` takes a comma-separated list of dimensions:
+`process`, `host`, `ip`, `port`, `interface`, `protocol`, `direction`, `time`.
+Default: `process`.
 
-`hosts` — what hosts did a given process connect to:
-```
-bw-meter hosts --process deltachat-rpc-server [--since DATE] [--until DATE]
-```
+`--show` takes a comma-separated list of measure columns:
+`in`, `out`, `total`, `packets`.  Default: `in,out,total`.
 
-`processes` — what processes connected to a given host:
+`--sort` accepts: `total` (default), `in`, `out`, `packets`, `time`.
+When `time` is in `--group-by`, the default sort is `time` (ascending).
+
+`--interval` sets the time bucket size when `time` is in `--group-by` (default: `1h`).
+
+`--process`, `--host`, `--port` filter the result rows.  Use `(kernel)` as the process
+name to select untagged/kernel traffic.
+
+Examples:
 ```
-bw-meter processes --host api.anthropic.com [--since DATE] [--until DATE]
+bw-meter report                                        # by process, current month
+bw-meter report --group-by host                        # by remote host
+bw-meter report --group-by process,host                # cross-tabulate
+bw-meter report --group-by time --interval 1h          # hourly timeline
+bw-meter report --group-by host --process curl         # hosts used by curl
+bw-meter report --group-by process --host api.anthropic.com
+bw-meter report --group-by port --show total
+bw-meter report --group-by process --show in,out,total,packets
 ```
 
 ### Global options
@@ -245,6 +253,8 @@ A configuration file should be supported.  See the INSTALL.md
 ## TODO (prioritised)
 
 ## Notes on the CLI
+
+**Status: fixed, needs acceptance-testing**
 
 I'm not happy with the CLI as it is now - with multiple relatively confusing commands (report vs top vs hosts vs processes).
 

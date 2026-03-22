@@ -11,12 +11,7 @@ import pytest
 from bw_meter.cli import (
     _format_bytes,
     _parse_interval,
-    cmd_hosts,
-    cmd_ports,
-    cmd_processes,
     cmd_report,
-    cmd_timeline,
-    cmd_top,
 )
 from bw_meter.db import (
     ensure_schema,
@@ -107,7 +102,7 @@ def db_path(tmp_path):
                 "bytes": 30_000,
                 "packets": 200,
             },
-            # kernel/untagged traffic — to a known host so we can drill down
+            # kernel/untagged traffic
             {
                 "ts": BASE_TS,
                 "bucket_secs": 60,
@@ -133,7 +128,7 @@ def db_path(tmp_path):
                 "packets": 99,
                 "remote_port": 443,
             },
-            # curl → port 443 on example.com (for port filter tests)
+            # curl → port 443 on example.com
             {
                 "ts": BASE_TS + 60,
                 "bucket_secs": 60,
@@ -174,7 +169,14 @@ def _args(**kwargs) -> argparse.Namespace:
         "since": "2024-01-01",
         "until": "2025-01-01",
         "json": False,
-        "sort": "total",
+        "sort": None,
+        "group_by": "process",
+        "show": "in,out,total",
+        "interval": "1h",
+        "limit": None,
+        "process": None,
+        "host": None,
+        "port": None,
     }
     defaults.update(kwargs)
     return argparse.Namespace(**defaults)
@@ -223,310 +225,273 @@ class TestParseInterval:
 
 
 # ---------------------------------------------------------------------------
-# cmd_report
+# --group-by process  (default; replaces old cmd_report / cmd_top --by process)
 # ---------------------------------------------------------------------------
 
 
-class TestCmdReport:
-    def test_sort_by_out_changes_order(self, db_path, capsys):
-        # On all interfaces: curl has more out (1000+200+100+9999=11299) than firefox (2000).
-        # Default (total) ranks firefox first; sort=out should rank curl first.
-        args = _args(db=db_path, sort="total")
-        cmd_report(args)
-        default_out = capsys.readouterr().out
-        args = _args(db=db_path, sort="out")
-        cmd_report(args)
-        sorted_out = capsys.readouterr().out
-        assert default_out.index("firefox") < default_out.index("curl")
-        assert sorted_out.index("curl") < sorted_out.index("firefox")
-
-    def test_sort_by_packets(self, db_path, capsys):
-        args = _args(db=db_path, sort="packets")
-        rc = cmd_report(args)
-        assert rc == 0
-
+class TestGroupByProcess:
     def test_shows_process_names(self, db_path, capsys):
-        args = _args(db=db_path)
-        rc = cmd_report(args)
+        rc = cmd_report(_args(db=db_path))
         assert rc == 0
         out = capsys.readouterr().out
         assert "curl" in out
         assert "firefox" in out
 
     def test_shows_kernel_traffic(self, db_path, capsys):
-        args = _args(db=db_path)
-        cmd_report(args)
-        out = capsys.readouterr().out
-        assert "(kernel)" in out
+        cmd_report(_args(db=db_path))
+        assert "(kernel)" in capsys.readouterr().out
 
-    def test_firefox_ranked_above_curl(self, db_path, capsys):
-        args = _args(db=db_path)
-        cmd_report(args)
+    def test_firefox_ranked_above_curl_by_total(self, db_path, capsys):
+        cmd_report(_args(db=db_path))
         out = capsys.readouterr().out
         assert out.index("firefox") < out.index("curl")
 
-    def test_interface_filter_excludes_other_interface(self, db_path, capsys):
-        # With interface=wlan0, the 9999-byte eth0 row should not appear in totals
-        # for curl; the wlan0 total for curl is 1000+5000 = 6000 bytes
-        args = _args(db=db_path, interface="wlan0")
-        cmd_report(args)
-        out = capsys.readouterr().out
-        # eth0-only curl traffic (9999 bytes) should not appear in wlan0-only report
-        assert "9.8 KB" not in out  # 9999 bytes formatted
-
-    def test_json_output(self, db_path, capsys):
-        args = _args(db=db_path, json=True)
-        rc = cmd_report(args)
-        assert rc == 0
-        out = capsys.readouterr().out
-        data = json.loads(out)
-        assert isinstance(data, list)
-        assert any(row["process"] == "firefox" for row in data)
-
-
-# ---------------------------------------------------------------------------
-# cmd_top
-# ---------------------------------------------------------------------------
-
-
-class TestCmdTop:
-    def test_sort_by_out_changes_order(self, db_path, capsys):
-        args = _args(db=db_path, by="process", limit=10, sort="out")
-        cmd_top(args)
+    def test_sort_by_out_reverses_order(self, db_path, capsys):
+        # curl has more outbound than firefox across all interfaces
+        cmd_report(_args(db=db_path, sort="out"))
         out = capsys.readouterr().out
         assert out.index("curl") < out.index("firefox")
 
-    def test_by_process(self, db_path, capsys):
-        args = _args(db=db_path, by="process", limit=10)
-        rc = cmd_top(args)
-        assert rc == 0
-        out = capsys.readouterr().out
-        assert "curl" in out
-        assert "firefox" in out
+    def test_sort_by_packets(self, db_path, capsys):
+        assert cmd_report(_args(db=db_path, sort="packets")) == 0
 
-    def test_by_process_respects_limit(self, db_path, capsys):
-        args = _args(db=db_path, by="process", limit=1)
-        cmd_top(args)
+    def test_interface_filter(self, db_path, capsys):
+        # wlan0 only: the 9999-byte eth0 curl row must not appear
+        cmd_report(_args(db=db_path, interface="wlan0"))
         out = capsys.readouterr().out
-        # Only 1 row → only the top process (firefox) should appear
+        assert "9.8 KB" not in out  # 9999 bytes formatted
+
+    def test_limit(self, db_path, capsys):
+        cmd_report(_args(db=db_path, limit=1))
+        out = capsys.readouterr().out
         assert "firefox" in out
         assert "curl" not in out
 
-    def test_by_host(self, db_path, capsys):
-        args = _args(db=db_path, by="host", limit=10)
-        rc = cmd_top(args)
+    def test_json_output(self, db_path, capsys):
+        rc = cmd_report(_args(db=db_path, json=True))
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert isinstance(data, list)
+        assert any(row["process"] == "firefox" for row in data)
+        assert "bytes_in" in data[0]
+        assert "bytes_out" in data[0]
+        assert "total_bytes" in data[0]
+
+
+# ---------------------------------------------------------------------------
+# --group-by host  (replaces old cmd_top --by host / cmd_hosts)
+# ---------------------------------------------------------------------------
+
+
+class TestGroupByHost:
+    def test_shows_hosts(self, db_path, capsys):
+        rc = cmd_report(_args(db=db_path, group_by="host"))
         assert rc == 0
         out = capsys.readouterr().out
         assert "example.com" in out
         assert "dns.google" in out
 
-    def test_by_host_plus_process(self, db_path, capsys):
-        args = _args(db=db_path, by="process+host", limit=10)
-        rc = cmd_top(args)
+    def test_filter_by_process(self, db_path, capsys):
+        cmd_report(_args(db=db_path, group_by="host", process="curl"))
+        out = capsys.readouterr().out
+        assert "dns.google" in out
+
+    def test_unknown_process_no_data(self, db_path, capsys):
+        cmd_report(_args(db=db_path, group_by="host", process="nonexistent"))
+        out = capsys.readouterr().out
+        assert "dns.google" not in out
+
+    def test_kernel_process(self, db_path, capsys):
+        cmd_report(_args(db=db_path, group_by="host", process="(kernel)"))
+        out = capsys.readouterr().out
+        assert "dns.google" in out
+
+    def test_sort_by_out(self, db_path, capsys):
+        # dns.google has more outbound than example.com across all interfaces
+        cmd_report(_args(db=db_path, group_by="host", sort="out"))
+        out = capsys.readouterr().out
+        assert out.index("dns.google") < out.index("example.com")
+
+    def test_port_filter(self, db_path, capsys):
+        cmd_report(_args(db=db_path, group_by="host", process="curl", port=443))
+        out = capsys.readouterr().out
+        assert "example.com" in out
+
+    def test_json_output(self, db_path, capsys):
+        rc = cmd_report(_args(db=db_path, group_by="host", process="curl", json=True))
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert any("dns.google" in str(row.get("host", "")) for row in data)
+
+
+# ---------------------------------------------------------------------------
+# --group-by process,host  (replaces old cmd_top --by process+host)
+# ---------------------------------------------------------------------------
+
+
+class TestGroupByProcessHost:
+    def test_shows_both_columns(self, db_path, capsys):
+        rc = cmd_report(_args(db=db_path, group_by="process,host"))
         assert rc == 0
         out = capsys.readouterr().out
         assert "firefox" in out
         assert "example.com" in out
 
     def test_json_output(self, db_path, capsys):
-        args = _args(db=db_path, by="process", limit=10, json=True)
-        rc = cmd_top(args)
+        rc = cmd_report(_args(db=db_path, group_by="process,host", json=True))
         assert rc == 0
         data = json.loads(capsys.readouterr().out)
-        assert isinstance(data, list)
-        assert data[0]["process"] == "firefox"
+        assert "process" in data[0]
+        assert "host" in data[0]
 
 
 # ---------------------------------------------------------------------------
-# cmd_timeline
+# --group-by process --host  (replaces old cmd_processes)
 # ---------------------------------------------------------------------------
 
 
-class TestCmdTimeline:
-    def test_basic(self, db_path, capsys):
-        args = _args(db=db_path, interval="1m", process=None, host=None)
-        rc = cmd_timeline(args)
-        assert rc == 0
-        out = capsys.readouterr().out
-        assert len(out.strip().splitlines()) >= 2  # header + at least one data row
-
-    def test_filter_by_process(self, db_path, capsys):
-        args = _args(db=db_path, interval="1m", process="curl", host=None)
-        cmd_timeline(args)
-        out = capsys.readouterr().out
-        # Only curl traffic — should have fewer bytes than unfiltered
-        lines = [ln for ln in out.strip().splitlines() if ln and not ln.startswith("-") and "time" not in ln.lower()]
-        assert lines  # some rows
-
-    def test_filter_by_host(self, db_path, capsys):
-        args = _args(db=db_path, interval="1m", process=None, host="example.com")
-        cmd_timeline(args)
-        out = capsys.readouterr().out
-        assert out.strip()
-
-    def test_json_output(self, db_path, capsys):
-        args = _args(db=db_path, interval="1m", process=None, host=None, json=True)
-        rc = cmd_timeline(args)
-        assert rc == 0
-        data = json.loads(capsys.readouterr().out)
-        assert isinstance(data, list)
-
-    def test_invalid_interval_raises(self, db_path):
-        args = _args(db=db_path, interval="badval", process=None, host=None)
-        with pytest.raises(ValueError, match="Invalid interval"):
-            cmd_timeline(args)
-
-
-# ---------------------------------------------------------------------------
-# cmd_hosts
-# ---------------------------------------------------------------------------
-
-
-class TestCmdHosts:
-    def test_shows_hosts_for_process(self, db_path, capsys):
-        args = _args(db=db_path, process="curl")
-        rc = cmd_hosts(args)
-        assert rc == 0
-        out = capsys.readouterr().out
-        assert "dns.google" in out
-
-    def test_unknown_process_shows_no_data(self, db_path, capsys):
-        args = _args(db=db_path, process="nonexistent")
-        rc = cmd_hosts(args)
-        assert rc == 0
-        out = capsys.readouterr().out
-        # no data rows — output may be empty or just headers
-        assert "dns.google" not in out
-
-    def test_json_output(self, db_path, capsys):
-        args = _args(db=db_path, process="curl", json=True)
-        rc = cmd_hosts(args)
-        assert rc == 0
-        data = json.loads(capsys.readouterr().out)
-        assert isinstance(data, list)
-        assert any("dns.google" in str(row.get("host", "")) for row in data)
-
-    def test_sort_by_out_changes_order(self, db_path, capsys):
-        # dns.google has more out (1000+500+9999=11499) than example.com (2000+300=2300)
-        # default (total) ranks example.com first; sort=out should rank dns.google first
-        args = _args(db=db_path, process=None, sort="out")
-        cmd_hosts(args)
-        out = capsys.readouterr().out
-        assert out.index("dns.google") < out.index("example.com")
-
-    def test_no_process_shows_all_hosts(self, db_path, capsys):
-        args = _args(db=db_path, process=None)
-        rc = cmd_hosts(args)
-        assert rc == 0
-        out = capsys.readouterr().out
-        assert "dns.google" in out
-        assert "example.com" in out
-
-    def test_kernel_process_shows_hosts(self, db_path, capsys):
-        args = _args(db=db_path, process="(kernel)")
-        rc = cmd_hosts(args)
-        assert rc == 0
-        out = capsys.readouterr().out
-        assert "dns.google" in out
-
-    def test_port_filter(self, db_path, capsys):
-        # curl has traffic to example.com on ports 443 and 80; port=443 should exclude port 80
-        args = _args(db=db_path, process="curl", port=443)
-        rc = cmd_hosts(args)
-        assert rc == 0
-        out = capsys.readouterr().out
-        assert "example.com" in out
-        # The 80-port row (100 bytes) should not bloat the total
-        data_lines = [ln for ln in out.splitlines() if "example.com" in ln]
-        assert data_lines
-
-
-# ---------------------------------------------------------------------------
-# cmd_processes
-# ---------------------------------------------------------------------------
-
-
-class TestCmdProcesses:
+class TestFilterByHost:
     def test_shows_processes_for_host(self, db_path, capsys):
-        args = _args(db=db_path, host="example.com")
-        rc = cmd_processes(args)
+        rc = cmd_report(_args(db=db_path, group_by="process", host="example.com"))
         assert rc == 0
         out = capsys.readouterr().out
         assert "firefox" in out
 
     def test_filter_by_ip(self, db_path, capsys):
-        args = _args(db=db_path, host="8.8.8.8")
-        cmd_processes(args)
+        cmd_report(_args(db=db_path, group_by="process", host="8.8.8.8"))
         out = capsys.readouterr().out
         assert "curl" in out
 
-    def test_json_output(self, db_path, capsys):
-        args = _args(db=db_path, host="example.com", json=True)
-        rc = cmd_processes(args)
-        assert rc == 0
-        data = json.loads(capsys.readouterr().out)
-        assert isinstance(data, list)
-        assert any(row.get("process") == "firefox" for row in data)
-
-    def test_sort_by_in(self, db_path, capsys):
-        args = _args(db=db_path, host="dns.google", sort="in")
-        rc = cmd_processes(args)
-        assert rc == 0
-
     def test_port_filter(self, db_path, capsys):
-        # example.com has curl traffic on port 443 and 80; port=80 should not include firefox
-        args = _args(db=db_path, host="example.com", port=80)
-        rc = cmd_processes(args)
-        assert rc == 0
+        # example.com has curl on 80 and 443; port=80 should exclude firefox (no port-80 traffic)
+        cmd_report(_args(db=db_path, group_by="process", host="example.com", port=80))
         out = capsys.readouterr().out
         assert "curl" in out
         assert "firefox" not in out
 
+    def test_json_output(self, db_path, capsys):
+        rc = cmd_report(_args(db=db_path, group_by="process", host="example.com", json=True))
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert any(row.get("process") == "firefox" for row in data)
+
 
 # ---------------------------------------------------------------------------
-# cmd_ports
+# --group-by port  (replaces old cmd_ports)
 # ---------------------------------------------------------------------------
 
 
-class TestCmdPorts:
-    def test_ports_for_process(self, db_path, capsys):
-        args = _args(db=db_path, process="curl", host=None)
-        rc = cmd_ports(args)
+class TestGroupByPort:
+    def test_shows_ports(self, db_path, capsys):
+        rc = cmd_report(_args(db=db_path, group_by="port"))
         assert rc == 0
         out = capsys.readouterr().out
         assert "443" in out
+        assert "Port" in out
 
-    def test_ports_for_host(self, db_path, capsys):
-        args = _args(db=db_path, process=None, host="example.com")
-        rc = cmd_ports(args)
-        assert rc == 0
+    def test_filter_by_process(self, db_path, capsys):
+        cmd_report(_args(db=db_path, group_by="port", process="curl"))
         out = capsys.readouterr().out
         assert "443" in out
 
-    def test_ports_for_process_and_host(self, db_path, capsys):
-        args = _args(db=db_path, process="curl", host="example.com")
-        rc = cmd_ports(args)
-        assert rc == 0
+    def test_filter_by_host(self, db_path, capsys):
+        cmd_report(_args(db=db_path, group_by="port", host="example.com"))
         out = capsys.readouterr().out
         assert "443" in out
         assert "80" in out
 
-    def test_sort_by_packets(self, db_path, capsys):
-        args = _args(db=db_path, process="curl", host=None, sort="packets")
-        rc = cmd_ports(args)
-        assert rc == 0
-
-    def test_ports_global(self, db_path, capsys):
-        args = _args(db=db_path, process=None, host=None)
-        rc = cmd_ports(args)
-        assert rc == 0
-        out = capsys.readouterr().out
-        assert "Port" in out  # header
+    def test_null_ports_excluded(self, db_path, capsys):
+        # The WireGuard/kernel row has remote_port=NULL; must not appear
+        cmd_report(_args(db=db_path, group_by="port", json=True))
+        data = json.loads(capsys.readouterr().out)
+        assert all(row["port"] is not None for row in data)
 
     def test_json_output(self, db_path, capsys):
-        args = _args(db=db_path, process="curl", host=None, json=True)
-        rc = cmd_ports(args)
+        rc = cmd_report(_args(db=db_path, group_by="port", process="curl", json=True))
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert any(row.get("port") == 443 for row in data)
+
+
+# ---------------------------------------------------------------------------
+# --group-by time  (replaces old cmd_timeline)
+# ---------------------------------------------------------------------------
+
+
+class TestGroupByTime:
+    def test_basic_timeline(self, db_path, capsys):
+        rc = cmd_report(_args(db=db_path, group_by="time", interval="1m"))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert len(out.strip().splitlines()) >= 2  # header + at least one row
+
+    def test_default_sort_is_time_asc(self, db_path, capsys):
+        cmd_report(_args(db=db_path, group_by="time", interval="1m"))
+        out = capsys.readouterr().out
+        lines = [ln for ln in out.splitlines() if "2024" in ln]
+        assert lines == sorted(lines)
+
+    def test_filter_by_process(self, db_path, capsys):
+        rc = cmd_report(_args(db=db_path, group_by="time", interval="1m", process="curl"))
+        assert rc == 0
+        assert capsys.readouterr().out.strip()
+
+    def test_filter_by_host(self, db_path, capsys):
+        rc = cmd_report(_args(db=db_path, group_by="time", interval="1m", host="example.com"))
+        assert rc == 0
+        assert capsys.readouterr().out.strip()
+
+    def test_json_output(self, db_path, capsys):
+        rc = cmd_report(_args(db=db_path, group_by="time", interval="1m", json=True))
         assert rc == 0
         data = json.loads(capsys.readouterr().out)
         assert isinstance(data, list)
-        assert any(row.get("port") == 443 for row in data)
+        assert all("time" in row for row in data)
+
+    def test_invalid_interval_raises(self, db_path):
+        with pytest.raises(ValueError, match="Invalid interval"):
+            cmd_report(_args(db=db_path, group_by="time", interval="badval"))
+
+    def test_sort_time_without_time_group_errors(self, db_path, capsys):
+        rc = cmd_report(_args(db=db_path, group_by="process", sort="time"))
+        assert rc == 1
+
+
+# ---------------------------------------------------------------------------
+# --show variations
+# ---------------------------------------------------------------------------
+
+
+class TestShowColumns:
+    def test_show_total_only(self, db_path, capsys):
+        cmd_report(_args(db=db_path, show="total"))
+        out = capsys.readouterr().out
+        assert "Total" in out
+        assert "In" not in out
+        assert "Out" not in out
+
+    def test_show_packets(self, db_path, capsys):
+        cmd_report(_args(db=db_path, show="total,packets"))
+        out = capsys.readouterr().out
+        assert "Packets" in out
+
+    def test_json_show_total_only(self, db_path, capsys):
+        cmd_report(_args(db=db_path, show="total", json=True))
+        data = json.loads(capsys.readouterr().out)
+        assert "total_bytes" in data[0]
+        assert "bytes_in" not in data[0]
+
+    def test_invalid_show_column(self, db_path, capsys):
+        rc = cmd_report(_args(db=db_path, show="bogus"))
+        assert rc == 1
+
+
+# ---------------------------------------------------------------------------
+# Validation errors
+# ---------------------------------------------------------------------------
+
+
+class TestValidation:
+    def test_invalid_group_by(self, db_path, capsys):
+        rc = cmd_report(_args(db=db_path, group_by="bogus"))
+        assert rc == 1
