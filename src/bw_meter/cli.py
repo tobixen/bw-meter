@@ -332,10 +332,14 @@ def cmd_hosts(args: argparse.Namespace) -> int:
     iface_sql, iface_params = _iface_filter(args)
     port_sql, port_params = _port_filter(args)
 
-    if args.process == "(kernel)":
+    if args.process is None:
+        proc_join = ""
+        proc_filter = ""
+        proc_params: list = []
+    elif args.process == "(kernel)":
         proc_join = ""
         proc_filter = "AND t.process_id IS NULL"
-        proc_params: list = []
+        proc_params = []
     else:
         proc_join = "LEFT JOIN process p ON t.process_id = p.id"
         proc_filter = "AND p.name = ?"
@@ -620,10 +624,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_tl.set_defaults(func=cmd_timeline)
 
     # hosts
-    p_hosts = sub.add_parser("hosts", help="What hosts did a given process connect to?")
+    p_hosts = sub.add_parser("hosts", help="Hosts by bandwidth usage, optionally filtered by process")
     add_time_args(p_hosts)
     p_hosts.add_argument(
-        "--process", metavar="NAME", required=True, help="Process name (use '(kernel)' for untagged traffic)"
+        "--process", metavar="NAME", help="Filter to a specific process name (use '(kernel)' for untagged traffic)"
     )
     p_hosts.add_argument("--port", metavar="PORT", type=int, help="Restrict to a specific remote port")
     p_hosts.set_defaults(func=cmd_hosts)

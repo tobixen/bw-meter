@@ -382,6 +382,14 @@ class TestCmdHosts:
         assert isinstance(data, list)
         assert any("dns.google" in str(row.get("host", "")) for row in data)
 
+    def test_no_process_shows_all_hosts(self, db_path, capsys):
+        args = _args(db=db_path, process=None)
+        rc = cmd_hosts(args)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "dns.google" in out
+        assert "example.com" in out
+
     def test_kernel_process_shows_hosts(self, db_path, capsys):
         args = _args(db=db_path, process="(kernel)")
         rc = cmd_hosts(args)
