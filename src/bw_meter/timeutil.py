@@ -7,6 +7,8 @@ import dateparser
 
 _RELATIVE_RE = re.compile(r"^([+-])(\d+(?:\.\d+)?)([smhdw])$")
 _UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+# Matches strings that explicitly specify a time-of-day (HH:MM, am/pm, "ago", or time units).
+_HAS_TIME_RE = re.compile(r"\d:\d|[aApP][mM]\b|\bago\b|\b(?:hour|minute|second)s?\b", re.IGNORECASE)
 
 
 def parse_dt(s: str) -> datetime.datetime:
@@ -35,4 +37,8 @@ def parse_dt(s: str) -> datetime.datetime:
     result = dateparser.parse(s, settings=settings)
     if result is None:
         raise ValueError(f"Cannot parse datetime: {s!r}")
+    # Day-level inputs (e.g. "today", "yesterday", "Friday") should resolve to
+    # midnight, not the current clock time that dateparser injects by default.
+    if not _HAS_TIME_RE.search(s):
+        result = result.replace(hour=0, minute=0, second=0, microsecond=0)
     return result

@@ -13,6 +13,12 @@ class TestIsoParsing:
         assert result.date() == datetime.date(2026, 3, 21)
         assert result.tzinfo is not None
 
+    def test_iso_date_is_midnight(self):
+        result = parse_dt("2026-03-21")
+        assert result.hour == 0
+        assert result.minute == 0
+        assert result.second == 0
+
     def test_iso_datetime_T(self):
         result = parse_dt("2026-03-21T14:30")
         assert result.date() == datetime.date(2026, 3, 21)
@@ -62,10 +68,22 @@ class TestNaturalLanguage:
         assert result.date() == expected
         assert result.tzinfo is not None
 
+    def test_yesterday_is_midnight(self):
+        result = parse_dt("yesterday")
+        assert result.hour == 0
+        assert result.minute == 0
+        assert result.second == 0
+
     def test_today(self):
         result = parse_dt("today")
         assert result.date() == datetime.datetime.now().astimezone().date()
         assert result.tzinfo is not None
+
+    def test_today_is_midnight(self):
+        result = parse_dt("today")
+        assert result.hour == 0
+        assert result.minute == 0
+        assert result.second == 0
 
     def test_hours_ago(self):
         result = parse_dt("3 hours ago")
