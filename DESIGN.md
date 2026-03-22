@@ -244,15 +244,26 @@ A configuration file should be supported.  See the INSTALL.md
 
 ## TODO (prioritised)
 
-### FIX NOW!
+## Notes on the CLI
 
-* **Core distiller and CLI** — the basic pipeline described above.
+I'm not happy with the CLI as it is now - with multiple relatively confusing commands (report vs top vs hosts vs processes).
 
-* **Systemd units** — `ptcpdump@.service` template + `bw-meter-distill.timer`.
+I think we need only one CLI reporting command, and it should be fairly general.  Things to consider:
+
+* Output format - can be json or text as for now.
+* Columns to show/hide - the current report default is fine as a default, but it should be possible to add other fields (notably host, but also IP, port number and whatever else we have in the database - an also, weather to show num of packets or only total data amount, and weather to split it by in/out).
+* Columns to group by.  This is correlated with the one above, probably it makes no sense to show ungrouped columns (standard SQL should even give an error on this) or to hide columns that one groups by (the output would be confusing).
+* Filtering options - we don't need anything fancy here, as for now a simple process=foo or host=bar.acme.com would do
+* Sorting column(s)
+* Formatting.  We probably don't need any specialized formatting options as for now.
 
 ## Fix soon
 
-* **Rollup** — compact old 1-minute buckets into 10-minute buckets after 7 days to keep
+* **Rollup** — compact old data.  Two suggestion:
+
+  * Classic approach: take the 1-minute buckets and turn them into 10-minute buckets after 7 days.  After 30 days, turn them into 1-hour-buckets.  After 365 days, torn them into 1-day-buckets.
+  * A more dynamic approach: Every hour, if the space utilized by the database is more than 10% of the free disk space on the disk, compact it by combining 2 and 2 buckets - so 1-minute-buckets turns into 2-minute-buckets and 12-hour-buckets turns into 24-hour-buckets, etc.
+
    the database small.
 
 ## Fix later
