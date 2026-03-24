@@ -22,10 +22,10 @@ CREATE TABLE IF NOT EXISTS process (
 );
 
 CREATE TABLE IF NOT EXISTS host (
-    id          INTEGER PRIMARY KEY,
-    ip          TEXT NOT NULL,
-    hostname    TEXT,
-    UNIQUE(ip)
+    id            INTEGER PRIMARY KEY,
+    ip            TEXT NOT NULL,
+    hostname      TEXT,
+    last_observed INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS traffic (
@@ -53,6 +53,13 @@ CREATE INDEX IF NOT EXISTS traffic_process   ON traffic(process_id);
 CREATE INDEX IF NOT EXISTS traffic_interface ON traffic(interface, ts);
 """
 
+_HOST_INDEXES_SQL = """
+CREATE UNIQUE INDEX IF NOT EXISTS host_ip_hostname
+    ON host(ip, hostname) WHERE hostname IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS host_ip_null
+    ON host(ip) WHERE hostname IS NULL;
+"""
+
 
 def open_db(path: Path | str | None = None) -> sqlite3.Connection:
     """Open (or create) the SQLite database, ensuring the schema exists."""
@@ -78,6 +85,66 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     if "pid" not in process_cols:
         conn.execute("ALTER TABLE process ADD COLUMN pid INTEGER")
         conn.commit()
+    # Migration: update host table to support multiple hostnames per IP with last_observed.
+    _migrate_host(conn)
+
+
+def _host_has_old_unique(conn: sqlite3.Connection) -> bool:
+    """True if the host table still carries the old table-level UNIQUE(ip) constraint."""
+    return any(
+        row[0].startswith("sqlite_autoindex_host")
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='host'")
+    )
+
+
+def _migrate_host(conn: sqlite3.Connection) -> None:
+    """Migrate host table to (ip, hostname) partial-unique-index schema with last_observed."""
+    # Add last_observed column if missing (old databases lack it).
+    host_cols = {row[1] for row in conn.execute("PRAGMA table_info(host)")}
+    if "last_observed" not in host_cols:
+        conn.execute("ALTER TABLE host ADD COLUMN last_observed INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+    # Check whether the partial unique indexes already exist.
+    host_indexes = {
+        row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='host'")
+    }
+    if "host_ip_hostname" in host_indexes:
+        return  # already on new schema
+    # Determine whether the old UNIQUE(ip) table-level constraint is present.
+    if _host_has_old_unique(conn):
+        # Recreate the table to drop the old UNIQUE(ip) constraint, then add
+        # the two partial unique indexes.  Foreign-key checks must be disabled
+        # while the table is temporarily absent (a no-op inside a transaction,
+        # hence before BEGIN).  The recreation is one transaction so that a
+        # crash or a concurrent open_db() never sees the table missing.
+        conn.execute("PRAGMA foreign_keys=OFF")
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            if not _host_has_old_unique(conn):
+                conn.rollback()  # another process migrated while we waited for the lock
+            else:
+                conn.execute(
+                    """CREATE TABLE host_new (
+                        id            INTEGER PRIMARY KEY,
+                        ip            TEXT NOT NULL,
+                        hostname      TEXT,
+                        last_observed INTEGER NOT NULL DEFAULT 0
+                    )"""
+                )
+                conn.execute(
+                    "INSERT INTO host_new(id, ip, hostname, last_observed)"
+                    " SELECT id, ip, hostname, COALESCE(last_observed, 0) FROM host"
+                )
+                conn.execute("DROP TABLE host")
+                conn.execute("ALTER TABLE host_new RENAME TO host")
+                conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.execute("PRAGMA foreign_keys=ON")
+    # Create partial unique indexes (works for both fresh installs and migrated tables).
+    conn.executescript(_HOST_INDEXES_SQL)
 
 
 def get_processed_files(conn: sqlite3.Connection) -> set[str]:
@@ -125,20 +192,39 @@ def upsert_process(
     return int(row[0])
 
 
-def upsert_host(conn: sqlite3.Connection, ip: str, hostname: str | None = None) -> int:
+def upsert_host(
+    conn: sqlite3.Connection,
+    ip: str,
+    hostname: str | None = None,
+    last_observed: int | None = None,
+) -> int:
     """Insert or update a host row, returning its id.
 
-    An existing hostname is preserved if *hostname* is None.
+    The unique key is (ip, hostname): each distinct hostname observed for an IP
+    gets its own row.  For a NULL hostname, at most one row per IP is kept.
+    last_observed is updated to the maximum of the stored and new values.
     """
-    conn.execute(
-        """
-        INSERT INTO host(ip, hostname) VALUES (?, ?)
-        ON CONFLICT(ip) DO UPDATE SET
-            hostname = COALESCE(excluded.hostname, host.hostname)
-        """,
-        (ip, hostname),
-    )
-    row = conn.execute("SELECT id FROM host WHERE ip=?", (ip,)).fetchone()
+    ts = last_observed if last_observed is not None else int(time.time())
+    if hostname is not None:
+        conn.execute(
+            """
+            INSERT INTO host(ip, hostname, last_observed) VALUES (?, ?, ?)
+            ON CONFLICT(ip, hostname) WHERE hostname IS NOT NULL
+            DO UPDATE SET last_observed = MAX(host.last_observed, excluded.last_observed)
+            """,
+            (ip, hostname, ts),
+        )
+        row = conn.execute("SELECT id FROM host WHERE ip=? AND hostname=?", (ip, hostname)).fetchone()
+    else:
+        conn.execute(
+            """
+            INSERT INTO host(ip, hostname, last_observed) VALUES (?, NULL, ?)
+            ON CONFLICT(ip) WHERE hostname IS NULL
+            DO UPDATE SET last_observed = MAX(host.last_observed, excluded.last_observed)
+            """,
+            (ip, ts),
+        )
+        row = conn.execute("SELECT id FROM host WHERE ip=? AND hostname IS NULL", (ip,)).fetchone()
     return int(row[0])
 
 

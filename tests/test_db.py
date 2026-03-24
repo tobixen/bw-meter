@@ -81,6 +81,59 @@ class TestEnsureSchema:
         assert "pid" in cols
         c.close()
 
+    def test_migration_updates_host_table_from_old_schema(self):
+        """ensure_schema must add last_observed and switch to partial unique indexes."""
+        c = sqlite3.connect(":memory:")
+        # Simulate old host table with UNIQUE(ip) but no last_observed
+        c.execute(
+            """CREATE TABLE host (
+                id       INTEGER PRIMARY KEY,
+                ip       TEXT NOT NULL,
+                hostname TEXT,
+                UNIQUE(ip)
+            )"""
+        )
+        c.execute("INSERT INTO host(ip, hostname) VALUES ('1.2.3.4', 'example.com')")
+        c.execute("INSERT INTO host(ip, hostname) VALUES ('5.6.7.8', NULL)")
+        c.commit()
+        ensure_schema(c)
+        # last_observed column must now exist
+        cols = {row[1] for row in c.execute("PRAGMA table_info(host)")}
+        assert "last_observed" in cols
+        # Data must be preserved
+        rows = {row[0]: row[1] for row in c.execute("SELECT ip, hostname FROM host")}
+        assert rows["1.2.3.4"] == "example.com"
+        assert rows["5.6.7.8"] is None
+        # Partial unique indexes must exist
+        indexes = {row[0] for row in c.execute("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='host'")}
+        assert "host_ip_hostname" in indexes
+        assert "host_ip_null" in indexes
+        c.close()
+
+    def test_failed_host_migration_leaves_old_table_intact(self, tmp_path):
+        """If the table recreation fails half-way (after DROP), nothing must be lost."""
+        c = sqlite3.connect(tmp_path / "old.db")
+        c.execute("CREATE TABLE host (id INTEGER PRIMARY KEY, ip TEXT NOT NULL, hostname TEXT, UNIQUE(ip))")
+        c.execute("INSERT INTO host(ip, hostname) VALUES ('1.2.3.4', 'example.com')")
+        c.commit()
+
+        def deny_rename(action, _db, table, *_):
+            if action == sqlite3.SQLITE_ALTER_TABLE and table == "host_new":
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+
+        c.set_authorizer(deny_rename)
+        with pytest.raises(sqlite3.DatabaseError):
+            ensure_schema(c)
+        c.set_authorizer(None)
+        assert c.execute("SELECT ip, hostname FROM host").fetchall() == [("1.2.3.4", "example.com")]
+        assert c.execute("SELECT name FROM sqlite_master WHERE name='host_new'").fetchall() == []
+        c.close()
+
+    def test_host_table_has_last_observed_column(self, conn):
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(host)")}
+        assert "last_observed" in cols
+
 
 class TestUpsertProcess:
     def test_inserts_and_returns_id(self, conn):
@@ -186,28 +239,54 @@ class TestUpsertHost:
         hid = upsert_host(conn, "1.2.3.4")
         assert hid > 0
 
-    def test_same_ip_deduplicates(self, conn):
+    def test_same_ip_null_hostname_deduplicates(self, conn):
         id1 = upsert_host(conn, "1.2.3.4")
         id2 = upsert_host(conn, "1.2.3.4")
         assert id1 == id2
 
-    def test_adds_hostname(self, conn):
-        upsert_host(conn, "1.2.3.4")
-        upsert_host(conn, "1.2.3.4", "example.com")
-        row = conn.execute("SELECT hostname FROM host WHERE ip='1.2.3.4'").fetchone()
-        assert row[0] == "example.com"
+    def test_same_ip_same_hostname_deduplicates(self, conn):
+        id1 = upsert_host(conn, "1.2.3.4", "example.com")
+        id2 = upsert_host(conn, "1.2.3.4", "example.com")
+        assert id1 == id2
 
-    def test_does_not_overwrite_hostname_with_null(self, conn):
-        upsert_host(conn, "1.2.3.4", "example.com")
-        upsert_host(conn, "1.2.3.4")
-        row = conn.execute("SELECT hostname FROM host WHERE ip='1.2.3.4'").fetchone()
-        assert row[0] == "example.com"
+    def test_null_and_non_null_hostname_are_separate_rows(self, conn):
+        id_null = upsert_host(conn, "1.2.3.4")
+        id_named = upsert_host(conn, "1.2.3.4", "example.com")
+        assert id_null != id_named
+        rows = conn.execute("SELECT hostname FROM host WHERE ip='1.2.3.4' ORDER BY hostname").fetchall()
+        hostnames = {r[0] for r in rows}
+        assert None in hostnames
+        assert "example.com" in hostnames
 
-    def test_updates_hostname(self, conn):
-        upsert_host(conn, "1.2.3.4", "old.example.com")
-        upsert_host(conn, "1.2.3.4", "new.example.com")
-        row = conn.execute("SELECT hostname FROM host WHERE ip='1.2.3.4'").fetchone()
-        assert row[0] == "new.example.com"
+    def test_different_hostnames_same_ip_create_separate_rows(self, conn):
+        id1 = upsert_host(conn, "1.2.3.4", "a.example.com")
+        id2 = upsert_host(conn, "1.2.3.4", "b.example.com")
+        assert id1 != id2
+        count = conn.execute("SELECT COUNT(*) FROM host WHERE ip='1.2.3.4'").fetchone()[0]
+        assert count == 2
+
+    def test_last_observed_is_set(self, conn):
+        upsert_host(conn, "1.2.3.4", "example.com", last_observed=1_000_000)
+        row = conn.execute("SELECT last_observed FROM host WHERE ip='1.2.3.4' AND hostname='example.com'").fetchone()
+        assert row[0] == 1_000_000
+
+    def test_last_observed_updated_to_max_on_conflict(self, conn):
+        upsert_host(conn, "1.2.3.4", "example.com", last_observed=1_000_000)
+        upsert_host(conn, "1.2.3.4", "example.com", last_observed=2_000_000)
+        row = conn.execute("SELECT last_observed FROM host WHERE ip='1.2.3.4' AND hostname='example.com'").fetchone()
+        assert row[0] == 2_000_000
+
+    def test_last_observed_not_decreased(self, conn):
+        upsert_host(conn, "1.2.3.4", "example.com", last_observed=2_000_000)
+        upsert_host(conn, "1.2.3.4", "example.com", last_observed=1_000_000)
+        row = conn.execute("SELECT last_observed FROM host WHERE ip='1.2.3.4' AND hostname='example.com'").fetchone()
+        assert row[0] == 2_000_000
+
+    def test_null_hostname_last_observed_updated(self, conn):
+        upsert_host(conn, "1.2.3.4", last_observed=1_000_000)
+        upsert_host(conn, "1.2.3.4", last_observed=3_000_000)
+        row = conn.execute("SELECT last_observed FROM host WHERE ip='1.2.3.4' AND hostname IS NULL").fetchone()
+        assert row[0] == 3_000_000
 
 
 class TestCaptureFile:

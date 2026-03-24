@@ -26,12 +26,24 @@ _DIM_SELECT = {
     "process": "COALESCE(p.name, '(kernel)')",
     "cmdline": "COALESCE(p.args, p.cmd, '(kernel)')",
     "pid": "p.pid",
-    "host": "COALESCE(h.hostname, h.ip, '(unknown)')",
+    "host": (
+        "COALESCE("
+        "(SELECT hostname FROM host WHERE ip=h.ip AND hostname IS NOT NULL"
+        " ORDER BY last_observed DESC LIMIT 1),"
+        " h.ip, '(unknown)')"
+    ),
     "ip": "COALESCE(h.ip, '(unknown)')",
     "port": "t.remote_port",
     "interface": "t.interface",
     "protocol": "t.protocol",
     "direction": "t.direction",
+}
+
+# GROUP BY expression when it differs from the SELECT expression.
+# For "host" we group by IP so that all traffic for an IP is merged regardless
+# of which hostname was current when the traffic was recorded.
+_DIM_GROUP = {
+    "host": "COALESCE(h.ip, '(unknown)')",
 }
 
 # JOIN needed for each dimension (None = no extra join required)
@@ -206,7 +218,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         else:
             sel = _DIM_SELECT[dim]
             dim_selects.append(f"{sel} AS {dim}")
-            dim_groups.append(sel)
+            dim_groups.append(_DIM_GROUP.get(dim, sel))
             _add_join(_DIM_JOIN[dim])
 
     # Always compute all four measures (needed for ORDER BY and future show options)
@@ -237,7 +249,9 @@ def cmd_report(args: argparse.Namespace) -> int:
     host = getattr(args, "host", None)
     if host is not None:
         _add_join(_DIM_JOIN["host"])
-        where_clauses.append("(h.hostname = ? OR h.ip = ?)")
+        # Match by IP: traffic from capture files without a DNS answer for the IP
+        # sits on the NULL-hostname row of the same IP.
+        where_clauses.append("(h.ip IN (SELECT ip FROM host WHERE hostname = ?) OR h.ip = ?)")
         params.extend([host, host])
 
     port = getattr(args, "port", None)

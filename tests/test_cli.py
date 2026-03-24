@@ -532,6 +532,38 @@ class TestGroupByPid:
         assert 1234 in pids or 5678 in pids
 
 
+class TestHostFilterAcrossFiles:
+    def test_host_filter_includes_traffic_recorded_without_hostname(self, tmp_path, capsys):
+        """Traffic distilled from a later file (no DNS answer, NULL-hostname row) must still
+        match --host for an IP whose hostname was learned earlier."""
+        path = str(tmp_path / "t.db")
+        conn = sqlite3.connect(path)
+        ensure_schema(conn)
+        named = upsert_host(conn, "93.184.216.34", "example.com", last_observed=BASE_TS)
+        unnamed = upsert_host(conn, "93.184.216.34", None, last_observed=BASE_TS + 60)
+        row = {
+            "bucket_secs": 60,
+            "interface": "wlan0",
+            "process_id": None,
+            "direction": "in",
+            "protocol": "tcp",
+            "packets": 1,
+        }
+        insert_traffic_batch(
+            conn,
+            [
+                {**row, "ts": BASE_TS, "host_id": named, "bytes": 100},
+                {**row, "ts": BASE_TS + 60, "host_id": unnamed, "bytes": 900},
+            ],
+        )
+        conn.commit()
+        conn.close()
+        rc = cmd_report(_args(db=path, group_by="host", host="example.com", json=True))
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data == [{"host": "example.com", "bytes_in": 1000, "bytes_out": 0, "total_bytes": 1000}]
+
+
 # ---------------------------------------------------------------------------
 # Validation errors
 # ---------------------------------------------------------------------------

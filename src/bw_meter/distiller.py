@@ -368,7 +368,9 @@ def distill_file(
 
     traffic_rows: list[dict] = []
     for (bucket_ts, iface_, direction, remote_ip, protocol, comment, remote_port), counts in buckets.items():
-        host_id = upsert_host(conn, remote_ip, hostname_map.get(remote_ip)) if remote_ip else None
+        host_id = (
+            upsert_host(conn, remote_ip, hostname_map.get(remote_ip), last_observed=bucket_ts) if remote_ip else None
+        )
 
         process_id: int | None = None
         if comment:
