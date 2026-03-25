@@ -94,6 +94,23 @@ pipx install .
 make install   # will auto-detect uv / pipx or fall back to pip --user
 ```
 
+The distiller writes the database as root.  To let your regular user read it,
+either adjust the file ownership/permissions:
+
+```sh
+# give read access to all users (or use a specific group)
+chmod o+r /path/to/bw-meter.db
+```
+
+Or point the CLI at a copy you own by setting the `BW_METER_DB` environment
+variable (place this in your shell's rc file):
+
+```sh
+export BW_METER_DB=/path/to/bw-meter.db
+```
+
+The `--db` flag on the command line takes precedence over `BW_METER_DB`.
+
 ## Configuration
 
 TODO: NOT IMPLEMENTED YET! (except `make enable` will honor the list of metered interfaces)

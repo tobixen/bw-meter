@@ -2,11 +2,29 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import time
 from pathlib import Path
 
 DEFAULT_DB_PATH = Path.home() / ".local/share/bw-meter/bw-meter.db"
+
+
+def resolve_db_path(path: Path | str | None = None) -> Path:
+    """Return the effective database path.
+
+    Resolution order:
+    1. Explicit *path* argument
+    2. ``BW_METER_DB`` environment variable
+    3. ``DEFAULT_DB_PATH`` (``~/.local/share/bw-meter/bw-meter.db``)
+    """
+    if path:
+        return Path(path)
+    env = os.environ.get("BW_METER_DB")
+    if env:
+        return Path(env)
+    return DEFAULT_DB_PATH
+
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS process (
@@ -63,13 +81,25 @@ CREATE UNIQUE INDEX IF NOT EXISTS host_ip_null
 
 def open_db(path: Path | str | None = None) -> sqlite3.Connection:
     """Open (or create) the SQLite database, ensuring the schema exists."""
-    db_path = Path(path) if path else DEFAULT_DB_PATH
+    db_path = resolve_db_path(path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA journal_mode=WAL")
+    # Rollback journal rather than WAL: a WAL database cannot be opened by a
+    # reader without write access to its directory, and the database lives in
+    # root-owned /var/lib/bw-meter while reports run as a regular user.
+    conn.execute("PRAGMA journal_mode=DELETE")
     conn.execute("PRAGMA foreign_keys=ON")
     ensure_schema(conn)
     return conn
+
+
+def open_db_readonly(path: Path | str | None = None) -> sqlite3.Connection:
+    """Open an existing database read-only, without creating or migrating anything.
+
+    Raises ``sqlite3.OperationalError`` if the file does not exist or cannot be read.
+    """
+    db_path = resolve_db_path(path).absolute()
+    return sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True)
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:

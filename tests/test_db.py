@@ -300,6 +300,62 @@ class TestCaptureFile:
         mark_file_processed(conn, "/path/a.pcapng")  # must not raise
 
 
+class TestOpenDb:
+    def test_env_var_sets_db_path(self, tmp_path, monkeypatch):
+        """BW_METER_DB env var must be used when no explicit path is given."""
+        db_file = tmp_path / "custom.db"
+        monkeypatch.setenv("BW_METER_DB", str(db_file))
+        from bw_meter.db import open_db
+
+        conn = open_db()
+        conn.close()
+        assert db_file.exists()
+
+    def test_explicit_path_overrides_env_var(self, tmp_path, monkeypatch):
+        """Explicit path must take precedence over BW_METER_DB."""
+        monkeypatch.setenv("BW_METER_DB", str(tmp_path / "env.db"))
+        explicit = tmp_path / "explicit.db"
+        from bw_meter.db import open_db
+
+        conn = open_db(explicit)
+        conn.close()
+        assert explicit.exists()
+        assert not (tmp_path / "env.db").exists()
+
+    def test_open_db_readonly_in_readonly_directory(self, tmp_path):
+        from bw_meter.db import open_db, open_db_readonly
+
+        d = tmp_path / "ro"
+        d.mkdir()
+        open_db(d / "x.db").close()
+        d.chmod(0o555)
+        try:
+            conn = open_db_readonly(d / "x.db")
+            assert conn.execute("SELECT COUNT(*) FROM traffic").fetchone() == (0,)
+            conn.close()
+        finally:
+            d.chmod(0o755)
+
+    def test_open_db_readonly_does_not_create(self, tmp_path):
+        from bw_meter.db import open_db_readonly
+
+        with pytest.raises(sqlite3.OperationalError):
+            open_db_readonly(tmp_path / "missing.db")
+        assert not (tmp_path / "missing.db").exists()
+
+    def test_open_db_uses_rollback_journal(self, tmp_path):
+        """WAL would stop read-only users from opening the DB in a root-owned directory."""
+        from bw_meter.db import open_db
+
+        path = tmp_path / "x.db"
+        c = sqlite3.connect(path)
+        c.execute("PRAGMA journal_mode=WAL")
+        c.close()
+        conn = open_db(path)
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+        conn.close()
+
+
 class TestInsertTrafficBatch:
     def test_inserts_rows(self, conn):
         host_id = upsert_host(conn, "8.8.8.8", "dns.google")

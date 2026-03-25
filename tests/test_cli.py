@@ -573,3 +573,75 @@ class TestValidation:
     def test_invalid_group_by(self, db_path, capsys):
         rc = cmd_report(_args(db=db_path, group_by="bogus"))
         assert rc == 1
+
+
+# ---------------------------------------------------------------------------
+# Error handling — empty database / permission errors
+# ---------------------------------------------------------------------------
+
+
+class TestErrorHandling:
+    def test_empty_database_prints_message(self, tmp_path, capsys):
+        """An empty (fresh) database should print a helpful message to stderr."""
+        empty_db = str(tmp_path / "empty.db")
+        conn = sqlite3.connect(empty_db)
+        ensure_schema(conn)
+        conn.close()
+        rc = cmd_report(_args(db=empty_db))
+        assert rc == 0
+        out, err = capsys.readouterr()
+        assert out.strip() == ""  # no table output
+        assert empty_db in err  # path mentioned
+        assert "no" in err.lower()
+
+    def test_no_data_in_range_prints_message(self, db_path, capsys):
+        """When filters exclude all rows, a helpful message should appear on stderr."""
+        rc = cmd_report(_args(db=db_path, since="2000-01-01", until="2000-01-02"))
+        assert rc == 0
+        out, err = capsys.readouterr()
+        assert out.strip() == ""
+        assert "no" in err.lower()
+
+    def test_permission_error_on_open(self, monkeypatch, capsys):
+        """PermissionError when opening the database must produce a clear stderr message."""
+        from bw_meter import db
+
+        monkeypatch.setattr(
+            db, "open_db_readonly", lambda path=None: (_ for _ in ()).throw(PermissionError("Permission denied"))
+        )
+        rc = cmd_report(_args(db="/var/lib/bw-meter/bw-meter.db"))
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "permission" in err.lower() or "cannot open" in err.lower()
+
+    def test_env_var_db_path(self, tmp_path, monkeypatch, capsys):
+        """BW_METER_DB env var should be used when --db is not given."""
+        monkeypatch.setenv("BW_METER_DB", str(tmp_path / "env.db"))
+        rc = cmd_report(_args(db=None))
+        assert rc == 1  # report never creates the database
+        err = capsys.readouterr().err
+        assert str(tmp_path / "env.db") in err
+
+
+class TestEmptyResult:
+    def test_json_empty_result_prints_empty_list(self, db_path, capsys):
+        rc = cmd_report(_args(db=db_path, since="2000-01-01", until="2000-01-02", json=True))
+        assert rc == 0
+        out, err = capsys.readouterr()
+        assert json.loads(out) == []
+        assert "no" in err.lower()
+
+    def test_empty_result_message_mentions_filters(self, db_path, capsys):
+        rc = cmd_report(_args(db=db_path, process="nonexistent"))
+        assert rc == 0
+        assert "filter" in capsys.readouterr().err.lower()
+
+
+class TestReportReadOnly:
+    def test_missing_database_is_not_created(self, tmp_path, capsys):
+        missing = tmp_path / "typo" / "missing.db"
+        rc = cmd_report(_args(db=str(missing)))
+        assert rc == 1
+        assert str(missing) in capsys.readouterr().err
+        assert not missing.exists()
+        assert not missing.parent.exists()

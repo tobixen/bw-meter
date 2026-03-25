@@ -13,6 +13,7 @@ from pathlib import Path
 import argcomplete
 
 from ._version import __version__
+from .db import resolve_db_path
 from .timeutil import parse_dt
 
 _INTERVAL_RE = re.compile(r"^(\d+)([smhd])$")
@@ -143,9 +144,9 @@ def _time_range(args: argparse.Namespace) -> tuple[int, int]:
 
 
 def _open_conn(args: argparse.Namespace) -> sqlite3.Connection:
-    from .db import open_db
+    from .db import open_db_readonly
 
-    return open_db(args.db)
+    return open_db_readonly(args.db)
 
 
 # ---------------------------------------------------------------------------
@@ -283,11 +284,40 @@ def cmd_report(args: argparse.Namespace) -> int:
         {limit_clause}
     """
 
-    conn = _open_conn(args)
+    db_path = str(resolve_db_path(args.db))
+    try:
+        conn = _open_conn(args)
+    except (PermissionError, sqlite3.OperationalError) as exc:
+        print(f"error: cannot open database at {db_path!r}: {exc}", file=sys.stderr)
+        print("hint: use --db or set BW_METER_DB to specify an accessible database path", file=sys.stderr)
+        return 1
+
     try:
         rows = conn.execute(sql, params).fetchall()
+        if not rows:
+            any_traffic = conn.execute("SELECT 1 FROM traffic LIMIT 1").fetchone()
+    except sqlite3.DatabaseError as exc:
+        # e.g. a database the distiller has not yet migrated to the current schema
+        print(f"error: cannot read database at {db_path!r}: {exc}", file=sys.stderr)
+        return 1
     finally:
         conn.close()
+
+    if not rows:
+        if not any_traffic:
+            print(
+                f"No traffic data in database at {db_path!r}.",
+                file=sys.stderr,
+            )
+            print(
+                "Has the distiller run? Use --db or set BW_METER_DB to point to the correct database.",
+                file=sys.stderr,
+            )
+        else:
+            print("No data matches the selected time range and filters.", file=sys.stderr)
+        if getattr(args, "json", False):
+            print("[]")
+        return 0
 
     n_dims = len(group_by)
 
@@ -369,7 +399,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--db",
         metavar="PATH",
         default=None,
-        help="SQLite database path (default: ~/.local/share/bw-meter/bw-meter.db)",
+        help="SQLite database path (default: BW_METER_DB env var, or ~/.local/share/bw-meter/bw-meter.db)",
     )
     parser.add_argument(
         "--interface",
