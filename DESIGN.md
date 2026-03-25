@@ -234,7 +234,7 @@ bw-meter report --group-by process --show in,out,total,packets
 
 ### Global options
 
-- `--db PATH` — SQLite database path (default: `~/.local/share/bw-meter/bw-meter.db`)
+- `--db PATH` — SQLite database path (default: `$BW_METER_DB`, else `/var/lib/bw-meter/bw-meter.db`)
 - `--interface IFACE` — restrict to one interface (default: all interfaces marked metered
   in config)
 

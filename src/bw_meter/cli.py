@@ -399,7 +399,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--db",
         metavar="PATH",
         default=None,
-        help="SQLite database path (default: BW_METER_DB env var, or ~/.local/share/bw-meter/bw-meter.db)",
+        help="SQLite database path (default: BW_METER_DB env var, or /var/lib/bw-meter/bw-meter.db)",
     )
     parser.add_argument(
         "--interface",

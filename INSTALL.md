@@ -94,16 +94,21 @@ pipx install .
 make install   # will auto-detect uv / pipx or fall back to pip --user
 ```
 
-The distiller writes the database as root.  To let your regular user read it,
-either adjust the file ownership/permissions:
+The distiller writes the database as root to `/var/lib/bw-meter/bw-meter.db`
+(the default path used by the CLI as well).  `bw-meter report` opens it
+read-only, so read access to the file is all a regular user needs.
+
+With root's default umask the file is readable by every local user.  Mind that
+it holds the full command lines of all users' network-active processes, which
+may include tokens or passwords passed as arguments, and every hostname they
+contacted.  To restrict it to one group:
 
 ```sh
-# give read access to all users (or use a specific group)
-chmod o+r /path/to/bw-meter.db
+chgrp bw-meter /var/lib/bw-meter/bw-meter.db
+chmod 640 /var/lib/bw-meter/bw-meter.db
 ```
 
-Or point the CLI at a copy you own by setting the `BW_METER_DB` environment
-variable (place this in your shell's rc file):
+If you need to use a different path, set `BW_METER_DB` in your shell's rc file:
 
 ```sh
 export BW_METER_DB=/path/to/bw-meter.db

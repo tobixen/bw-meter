@@ -7,7 +7,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-DEFAULT_DB_PATH = Path.home() / ".local/share/bw-meter/bw-meter.db"
+DEFAULT_DB_PATH = Path("/var/lib/bw-meter/bw-meter.db")
 
 
 def resolve_db_path(path: Path | str | None = None) -> Path:
@@ -16,7 +16,7 @@ def resolve_db_path(path: Path | str | None = None) -> Path:
     Resolution order:
     1. Explicit *path* argument
     2. ``BW_METER_DB`` environment variable
-    3. ``DEFAULT_DB_PATH`` (``~/.local/share/bw-meter/bw-meter.db``)
+    3. ``DEFAULT_DB_PATH`` (``/var/lib/bw-meter/bw-meter.db``)
     """
     if path:
         return Path(path)
