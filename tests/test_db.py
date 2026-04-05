@@ -57,6 +57,30 @@ class TestEnsureSchema:
         assert "remote_port" in cols
         c.close()
 
+    def test_process_table_has_pid_column(self, conn):
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(process)")}
+        assert "pid" in cols
+
+    def test_migration_adds_pid_to_existing_process_table(self):
+        """ensure_schema must add pid even when process was created without it."""
+        c = sqlite3.connect(":memory:")
+        c.execute(
+            """CREATE TABLE process (
+                id INTEGER PRIMARY KEY,
+                cmd TEXT NOT NULL,
+                name TEXT NOT NULL,
+                args TEXT,
+                parent_cmd TEXT,
+                parent_args TEXT,
+                uid INTEGER,
+                UNIQUE(cmd, args, uid)
+            )"""
+        )
+        ensure_schema(c)
+        cols = {row[1] for row in c.execute("PRAGMA table_info(process)")}
+        assert "pid" in cols
+        c.close()
+
 
 class TestUpsertProcess:
     def test_inserts_and_returns_id(self, conn):
@@ -68,8 +92,30 @@ class TestUpsertProcess:
             parent_cmd=None,
             parent_args=None,
             uid=1000,
+            pid=42,
         )
         assert pid > 0
+
+    def test_pid_stored(self, conn):
+        row_id = upsert_process(
+            conn,
+            cmd="/usr/bin/foo",
+            name="foo",
+            args="foo --bar",
+            parent_cmd=None,
+            parent_args=None,
+            uid=1000,
+            pid=99,
+        )
+        row = conn.execute("SELECT pid FROM process WHERE id=?", (row_id,)).fetchone()
+        assert row[0] == 99
+
+    def test_pid_updated_on_conflict(self, conn):
+        # args must be non-NULL so the UNIQUE(cmd, args, uid) constraint fires
+        upsert_process(conn, cmd="/bin/sh", name="sh", args="sh", parent_cmd=None, parent_args=None, uid=0, pid=1)
+        upsert_process(conn, cmd="/bin/sh", name="sh", args="sh", parent_cmd=None, parent_args=None, uid=0, pid=2)
+        row = conn.execute("SELECT pid FROM process WHERE cmd='/bin/sh'").fetchone()
+        assert row[0] == 2
 
     def test_same_cmd_args_uid_deduplicates(self, conn):
         id1 = upsert_process(

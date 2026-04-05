@@ -383,6 +383,7 @@ def distill_file(
                     parent_cmd=parsed.get("parent_cmd"),
                     parent_args=parsed.get("parent_args"),
                     uid=int(parsed["uid"]) if parsed.get("uid") else None,
+                    pid=int(parsed["pid"]) if parsed.get("pid") else None,
                 )
 
         traffic_rows.append(

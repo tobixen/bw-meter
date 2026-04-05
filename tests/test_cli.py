@@ -39,6 +39,7 @@ def db_path(tmp_path):
         parent_cmd=None,
         parent_args=None,
         uid=1000,
+        pid=1234,
     )
     proc_firefox = upsert_process(
         conn,
@@ -48,6 +49,7 @@ def db_path(tmp_path):
         parent_cmd=None,
         parent_args=None,
         uid=1000,
+        pid=5678,
     )
 
     host_google = upsert_host(conn, "8.8.8.8", "dns.google")
@@ -484,6 +486,50 @@ class TestShowColumns:
     def test_invalid_show_column(self, db_path, capsys):
         rc = cmd_report(_args(db=db_path, show="bogus"))
         assert rc == 1
+
+
+# ---------------------------------------------------------------------------
+# --group-by cmdline
+# ---------------------------------------------------------------------------
+
+
+class TestGroupByCmdline:
+    def test_shows_full_command_line(self, db_path, capsys):
+        rc = cmd_report(_args(db=db_path, group_by="cmdline"))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "curl https://example.com" in out
+
+    def test_shows_kernel_traffic(self, db_path, capsys):
+        cmd_report(_args(db=db_path, group_by="cmdline"))
+        assert "(kernel)" in capsys.readouterr().out
+
+    def test_json_output(self, db_path, capsys):
+        rc = cmd_report(_args(db=db_path, group_by="cmdline", json=True))
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert any("curl https://example.com" in str(row.get("cmdline", "")) for row in data)
+
+
+# ---------------------------------------------------------------------------
+# --group-by pid
+# ---------------------------------------------------------------------------
+
+
+class TestGroupByPid:
+    def test_shows_pids(self, db_path, capsys):
+        rc = cmd_report(_args(db=db_path, group_by="pid"))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "1234" in out
+        assert "5678" in out
+
+    def test_json_output(self, db_path, capsys):
+        rc = cmd_report(_args(db=db_path, group_by="pid", json=True))
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        pids = [row.get("pid") for row in data]
+        assert 1234 in pids or 5678 in pids
 
 
 # ---------------------------------------------------------------------------

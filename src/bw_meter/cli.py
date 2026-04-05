@@ -18,12 +18,14 @@ from .timeutil import parse_dt
 _INTERVAL_RE = re.compile(r"^(\d+)([smhd])$")
 _INTERVAL_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 
-VALID_DIMENSIONS = ("process", "host", "ip", "port", "interface", "protocol", "direction", "time")
+VALID_DIMENSIONS = ("process", "cmdline", "pid", "host", "ip", "port", "interface", "protocol", "direction", "time")
 VALID_SHOW = ("in", "out", "total", "packets")
 
 # SQL expression for each dimension (excluding "time", which is dynamic)
 _DIM_SELECT = {
     "process": "COALESCE(p.name, '(kernel)')",
+    "cmdline": "COALESCE(p.args, p.cmd, '(kernel)')",
+    "pid": "p.pid",
     "host": "COALESCE(h.hostname, h.ip, '(unknown)')",
     "ip": "COALESCE(h.ip, '(unknown)')",
     "port": "t.remote_port",
@@ -35,6 +37,8 @@ _DIM_SELECT = {
 # JOIN needed for each dimension (None = no extra join required)
 _DIM_JOIN = {
     "process": "LEFT JOIN process p ON t.process_id = p.id",
+    "cmdline": "LEFT JOIN process p ON t.process_id = p.id",
+    "pid": "LEFT JOIN process p ON t.process_id = p.id",
     "host": "LEFT JOIN host h ON t.host_id = h.id",
     "ip": "LEFT JOIN host h ON t.host_id = h.id",
     "port": None,
@@ -46,6 +50,8 @@ _DIM_JOIN = {
 
 _DIM_HEADER = {
     "process": "Process",
+    "cmdline": "Cmdline",
+    "pid": "PID",
     "host": "Host",
     "ip": "IP",
     "port": "Port",
@@ -393,6 +399,8 @@ Query traffic data with flexible grouping, filtering, and sorting.
 
 Examples:
   bw-meter report                                  # by process, current month
+  bw-meter report --group-by cmdline               # full command line per process
+  bw-meter report --group-by pid                   # by process id (last-seen per invocation type)
   bw-meter report --group-by host                  # by remote host
   bw-meter report --group-by process,host          # cross-tabulate
   bw-meter report --group-by time --interval 1h    # hourly timeline

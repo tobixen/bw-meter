@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS process (
     parent_cmd  TEXT,
     parent_args TEXT,
     uid         INTEGER,
+    pid         INTEGER,
     UNIQUE(cmd, args, uid)
 );
 
@@ -68,9 +69,14 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     """Create tables and indexes if they do not exist (idempotent)."""
     conn.executescript(_SCHEMA_SQL)
     # Migration: add remote_port to traffic for databases created before this column existed.
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(traffic)")}
-    if "remote_port" not in cols:
+    traffic_cols = {row[1] for row in conn.execute("PRAGMA table_info(traffic)")}
+    if "remote_port" not in traffic_cols:
         conn.execute("ALTER TABLE traffic ADD COLUMN remote_port INTEGER")
+        conn.commit()
+    # Migration: add pid to process for databases created before this column existed.
+    process_cols = {row[1] for row in conn.execute("PRAGMA table_info(process)")}
+    if "pid" not in process_cols:
+        conn.execute("ALTER TABLE process ADD COLUMN pid INTEGER")
         conn.commit()
 
 
@@ -97,18 +103,20 @@ def upsert_process(
     parent_cmd: str | None,
     parent_args: str | None,
     uid: int | None,
+    pid: int | None = None,
 ) -> int:
     """Insert or update a process row, returning its id."""
     conn.execute(
         """
-        INSERT INTO process(cmd, name, args, parent_cmd, parent_args, uid)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO process(cmd, name, args, parent_cmd, parent_args, uid, pid)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(cmd, args, uid) DO UPDATE SET
             name        = excluded.name,
             parent_cmd  = excluded.parent_cmd,
-            parent_args = excluded.parent_args
+            parent_args = excluded.parent_args,
+            pid         = excluded.pid
         """,
-        (cmd, name, args, parent_cmd, parent_args, uid),
+        (cmd, name, args, parent_cmd, parent_args, uid, pid),
     )
     row = conn.execute(
         "SELECT id FROM process WHERE cmd=? AND args IS ? AND uid IS ?",
