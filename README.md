@@ -2,6 +2,8 @@
 
 CLI-tool for digging into accumulated bandwidth statistics
 
+This tool uses ptcpdump to find process information, and inspects the DNS replies (and TLS SNI) in the captured traffic to find host-IP mapping (as RDNS is mostly yielding junk in 2026).
+
 ## Rationale
 
 I'm most of the time using mobile networks for my internet connectivity, and then most of the time I have a metered connection.  For my primary subscription, it's full stop if the monthly limit is exceeded - and full stop means disaster.
