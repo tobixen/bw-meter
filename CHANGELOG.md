@@ -7,8 +7,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-- Initial project scaffold: Hatch build system, ruff, pytest, pre-commit hooks
-- `parse_dt()` in `timeutil.py` — flexible datetime parsing via dateparser (+offsets, natural language, ISO 8601)
-- CLI skeleton with subcommands: `report`, `top`, `timeline`, `hosts`, `processes`
-- All time arguments accept aliases: `--since`/`--from`/`--after`/`--begin`/`--start` and `--until`/`--to`/`--before`/`--end`
+Initial release.  See [README.md](README.md) and [INSTALL.md](INSTALL.md) for
+the feature set and setup.
