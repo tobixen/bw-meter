@@ -114,7 +114,10 @@ def _parse_interval(s: str) -> int:
     m = _INTERVAL_RE.match(s.strip())
     if not m:
         raise ValueError(f"Invalid interval {s!r}: expected a number followed by s/m/h/d")
-    return int(m.group(1)) * _INTERVAL_UNITS[m.group(2)]
+    secs = int(m.group(1)) * _INTERVAL_UNITS[m.group(2)]
+    if secs == 0:
+        raise ValueError(f"Invalid interval {s!r}: must be greater than zero")
+    return secs
 
 
 def _print_table(headers: list[str], rows: list[list]) -> None:
@@ -186,7 +189,11 @@ def cmd_report(args: argparse.Namespace) -> int:
     # --- Interval for time bucketing ---
     bucket_secs: int | None = None
     if "time" in group_by:
-        bucket_secs = _parse_interval(args.interval)
+        try:
+            bucket_secs = _parse_interval(args.interval)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
 
     # --- Sort column and direction ---
     sort = args.sort

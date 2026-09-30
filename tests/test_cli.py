@@ -450,10 +450,6 @@ class TestGroupByTime:
         assert isinstance(data, list)
         assert all("time" in row for row in data)
 
-    def test_invalid_interval_raises(self, db_path):
-        with pytest.raises(ValueError, match="Invalid interval"):
-            cmd_report(_args(db=db_path, group_by="time", interval="badval"))
-
     def test_sort_time_without_time_group_errors(self, db_path, capsys):
         rc = cmd_report(_args(db=db_path, group_by="process", sort="time"))
         assert rc == 1
@@ -645,3 +641,14 @@ class TestReportReadOnly:
         assert str(missing) in capsys.readouterr().err
         assert not missing.exists()
         assert not missing.parent.exists()
+
+
+class TestIntervalValidation:
+    def test_invalid_interval_is_an_error_not_a_traceback(self, db_path, capsys):
+        rc = cmd_report(_args(db=db_path, group_by="time", interval="badval"))
+        assert rc == 1
+        assert "interval" in capsys.readouterr().err.lower()
+
+    def test_zero_interval_rejected(self, db_path, capsys):
+        rc = cmd_report(_args(db=db_path, group_by="time", interval="0m"))
+        assert rc == 1
