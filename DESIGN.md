@@ -215,6 +215,10 @@ Default: `process`.
 `--sort` accepts: `total` (default), `in`, `out`, `packets`, `time`.
 When `time` is in `--group-by`, the default sort is `time` (ascending).
 
+`--limit N` (N ≥ 1) shows the top N rows, followed by an `(other)` row summing up
+the rest (omitted when nothing was cut off).  In JSON output that row has all
+dimensions `null` and `"other": true`.
+
 `--interval` sets the time bucket size when `time` is in `--group-by` (default: `1h`).
 
 `--process`, `--host`, `--port` filter the result rows.  Use `(kernel)` as the process

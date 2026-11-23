@@ -269,6 +269,49 @@ class TestGroupByProcess:
         assert "firefox" in out
         assert "curl" not in out
 
+    def test_limit_sums_long_tail_into_other_row(self, db_path, capsys):
+        cmd_report(_args(db=db_path, limit=1))
+        lines = capsys.readouterr().out.strip().splitlines()
+        assert lines[-1].startswith("(other)")
+
+    def test_limit_no_other_row_without_tail(self, db_path, capsys):
+        cmd_report(_args(db=db_path, limit=100))
+        assert "(other)" not in capsys.readouterr().out
+
+    def test_limit_other_row_json(self, db_path, capsys):
+        cmd_report(_args(db=db_path, json=True))
+        full = json.loads(capsys.readouterr().out)
+        cmd_report(_args(db=db_path, json=True, limit=1))
+        data = json.loads(capsys.readouterr().out)
+        assert len(data) == 2
+        assert data[0] == full[0]
+        assert data[1]["process"] is None
+        assert data[1]["other"] is True
+        assert all("other" not in row for row in data[:1])
+        for key in ("bytes_in", "bytes_out", "total_bytes"):
+            assert data[1][key] == sum(row[key] for row in full[1:])
+
+    def test_limit_other_row_multi_dim_with_time(self, db_path, capsys):
+        rc = cmd_report(_args(db=db_path, group_by="time,process", interval="1m", limit=1))
+        assert rc == 0
+        assert capsys.readouterr().out.strip().splitlines()[-1].startswith("(other)")
+        cmd_report(_args(db=db_path, group_by="time,process", interval="1m", json=True))
+        tail = json.loads(capsys.readouterr().out)[1:]
+        cmd_report(_args(db=db_path, group_by="time,process", interval="1m", limit=1, json=True))
+        assert json.loads(capsys.readouterr().out)[-1] == {
+            "time": None,
+            "process": None,
+            "other": True,
+            **{key: sum(row[key] for row in tail) for key in ("bytes_in", "bytes_out", "total_bytes")},
+        }
+
+    @pytest.mark.parametrize("limit", [0, -1])
+    def test_limit_below_one_is_rejected(self, db_path, capsys, limit):
+        assert cmd_report(_args(db=db_path, limit=limit)) == 1
+        captured = capsys.readouterr()
+        assert "--limit" in captured.err
+        assert captured.out == ""
+
     def test_json_output(self, db_path, capsys):
         rc = cmd_report(_args(db=db_path, json=True))
         assert rc == 0

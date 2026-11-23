@@ -22,6 +22,9 @@ _INTERVAL_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 VALID_DIMENSIONS = ("process", "cmdline", "pid", "host", "ip", "port", "interface", "protocol", "direction", "time")
 VALID_SHOW = ("in", "out", "total", "packets")
 
+# Label of the row summing up what --limit cut off
+OTHER_LABEL = "(other)"
+
 # SQL expression for each dimension (excluding "time", which is dynamic)
 _DIM_SELECT = {
     "process": "COALESCE(p.name, '(kernel)')",
@@ -195,6 +198,12 @@ def cmd_report(args: argparse.Namespace) -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 1
 
+    # --- Limit ---
+    limit = getattr(args, "limit", None)
+    if limit is not None and limit < 1:
+        print(f"error: --limit must be at least 1, got {limit}", file=sys.stderr)
+        return 1
+
     # --- Sort column and direction ---
     sort = args.sort
     if sort is None:
@@ -271,10 +280,6 @@ def cmd_report(args: argparse.Namespace) -> int:
     if "port" in group_by:
         where_clauses.append("t.remote_port IS NOT NULL")
 
-    # --- LIMIT ---
-    limit = getattr(args, "limit", None)
-    limit_clause = f"LIMIT {limit}" if limit else ""
-
     # --- Assemble SQL ---
     all_selects = dim_selects + measures_sql
     joins_sql = "\n        ".join(joins)
@@ -288,7 +293,6 @@ def cmd_report(args: argparse.Namespace) -> int:
         WHERE {where_sql}
         GROUP BY {groups_sql}
         ORDER BY {order_col} {order_dir}
-        {limit_clause}
     """
 
     db_path = str(resolve_db_path(args.db))
@@ -328,6 +332,16 @@ def cmd_report(args: argparse.Namespace) -> int:
 
     n_dims = len(group_by)
 
+    # --- LIMIT: sum up the long tail into one "(other)" row ---
+    # The dimensions of that row are None; the table labels it, JSON marks it.
+    other_row: tuple | None = None
+    if limit is not None and len(rows) > limit:
+        tail = rows[limit:]
+        rows = rows[:limit]
+        other_row = (None,) * n_dims
+        other_row += tuple(sum(r[i] or 0 for r in tail) for i in range(n_dims, len(tail[0])))
+        rows.append(other_row)
+
     if getattr(args, "json", False):
         result = []
         for row in rows:
@@ -337,6 +351,8 @@ def cmd_report(args: argparse.Namespace) -> int:
                 if dim == "time" and val is not None:
                     val = datetime.datetime.fromtimestamp(val).isoformat()
                 obj[dim] = val
+            if row is other_row:
+                obj["other"] = True
             for col in show_cols:
                 obj[_SHOW_JSON_KEY[col]] = row[n_dims + _MEASURE_IDX[col]]
             result.append(obj)
@@ -348,7 +364,9 @@ def cmd_report(args: argparse.Namespace) -> int:
             cells: list = []
             for i, dim in enumerate(group_by):
                 val = row[i]
-                if dim == "time":
+                if row is other_row:
+                    val = OTHER_LABEL if i == 0 else ""
+                elif dim == "time":
                     val = (
                         datetime.datetime.fromtimestamp(val).strftime("%Y-%m-%d %H:%M")
                         if val is not None
@@ -491,7 +509,7 @@ Examples:
         "-n",
         type=int,
         metavar="N",
-        help="Maximum number of rows to display",
+        help="Show the top N rows, plus an '(other)' row summing up the rest",
     )
     p_report.add_argument(
         "--process",
