@@ -66,6 +66,19 @@ CREATE TABLE IF NOT EXISTS capture_file (
     processed_at INTEGER NOT NULL
 );
 
+-- Tunnel endpoints of VPN interfaces (WireGuard), as seen by the distiller or
+-- configured.  Traffic to these on another interface is the VPN's outer,
+-- encrypted traffic; reports label it "(vpn:<interface>)".
+CREATE TABLE IF NOT EXISTS vpn_endpoint (
+    interface TEXT NOT NULL,
+    ip        TEXT NOT NULL,
+    port      INTEGER NOT NULL,
+    last_seen INTEGER NOT NULL,
+    PRIMARY KEY(interface, ip, port)
+);
+
+CREATE INDEX IF NOT EXISTS vpn_endpoint_ip_port ON vpn_endpoint(ip, port);
+
 CREATE INDEX IF NOT EXISTS traffic_ts        ON traffic(ts);
 CREATE INDEX IF NOT EXISTS traffic_process   ON traffic(process_id);
 CREATE INDEX IF NOT EXISTS traffic_interface ON traffic(interface, ts);
@@ -256,6 +269,17 @@ def upsert_host(
         )
         row = conn.execute("SELECT id FROM host WHERE ip=? AND hostname IS NULL", (ip,)).fetchone()
     return int(row[0])
+
+
+def record_vpn_endpoint(conn: sqlite3.Connection, interface: str, ip: str, port: int, seen: int) -> None:
+    """Remember that VPN *interface* tunnels to *ip*:*port* (does not commit)."""
+    conn.execute(
+        """
+        INSERT INTO vpn_endpoint(interface, ip, port, last_seen) VALUES (?, ?, ?, ?)
+        ON CONFLICT(interface, ip, port) DO UPDATE SET last_seen = MAX(last_seen, excluded.last_seen)
+        """,
+        (interface, ip, port, seen),
+    )
 
 
 def insert_traffic_batch(conn: sqlite3.Connection, rows: list[dict]) -> None:

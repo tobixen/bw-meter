@@ -1,17 +1,27 @@
 """Tests for bw_meter.distiller."""
 
 import os
+import sqlite3
+import subprocess
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
+
+from bw_meter.config import Config
+from bw_meter.db import ensure_schema
 from bw_meter.distiller import (
     _aggregate,
     build_hostname_map,
     derive_direction,
     derive_process_name,
     find_distillable_files,
+    get_wireguard_endpoints,
     iter_tshark_packets,
     parse_comment,
+    record_vpn_endpoints,
+    run_distiller,
 )
 
 
@@ -425,3 +435,73 @@ class TestFindDistillableFiles:
         iface_dir.mkdir()
         (iface_dir / "capture-only.pcapng").write_bytes(b"")
         assert find_distillable_files(tmp_path, set()) == []
+
+
+class TestWireguardEndpoints:
+    WG_OUTPUT = "wg0\tkey1=\t203.0.113.7:51820\nwg0\tkey2=\t(none)\nwg1\tkey3=\t[2001:db8::1]:51821\n"
+
+    def test_parses_wg_show(self, monkeypatch):
+        calls = []
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            assert kwargs.get("timeout")
+            return SimpleNamespace(stdout=self.WG_OUTPUT)
+
+        monkeypatch.setattr("bw_meter.distiller.subprocess.run", fake_run)
+        assert get_wireguard_endpoints() == {
+            "wg0": [("203.0.113.7", 51820)],
+            "wg1": [("2001:db8::1", 51821)],
+        }
+        assert calls == [["wg", "show", "all", "endpoints"]]
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            FileNotFoundError("wg"),
+            subprocess.CalledProcessError(1, "wg"),
+            PermissionError("wg"),
+            subprocess.TimeoutExpired("wg", 10),
+        ],
+    )
+    def test_no_wg_gives_nothing(self, monkeypatch, error):
+        def fake_run(args, **kwargs):
+            raise error
+
+        monkeypatch.setattr("bw_meter.distiller.subprocess.run", fake_run)
+        assert get_wireguard_endpoints() == {}
+
+    def test_record_merges_detected_and_configured(self, monkeypatch):
+        monkeypatch.setattr("bw_meter.distiller.get_wireguard_endpoints", lambda: {"wg0": [("203.0.113.7", 51820)]})
+        conn = sqlite3.connect(":memory:")
+        ensure_schema(conn)
+        config = Config(vpn_endpoints={"wg0": [("2001:db8::1", 51820)]})
+        record_vpn_endpoints(conn, config, now=500)
+        rows = sorted(conn.execute("SELECT interface, ip, port, last_seen FROM vpn_endpoint"))
+        conn.close()
+        assert rows == [
+            ("wg0", "2001:db8::1", 51820, 500),
+            ("wg0", "203.0.113.7", 51820, 500),
+        ]
+
+
+class TestRunDistillerConfig:
+    def _run(self, tmp_path, monkeypatch, config_text):
+        monkeypatch.setattr("bw_meter.distiller.get_wireguard_endpoints", lambda: {"wg0": [("203.0.113.7", 51820)]})
+        config = tmp_path / "config.toml"
+        config.write_text(config_text)
+        db = tmp_path / "test.db"
+        run_distiller(base_dir=tmp_path / "captures", db_path=db, config_path=config)
+        conn = sqlite3.connect(db)
+        rows = sorted(conn.execute("SELECT interface, ip, port FROM vpn_endpoint"))
+        conn.close()
+        return rows
+
+    def test_uses_given_config(self, tmp_path, monkeypatch):
+        rows = self._run(tmp_path, monkeypatch, '[vpn.wg1]\nendpoints = ["198.51.100.1:51820"]\n')
+        assert rows == [("wg0", "203.0.113.7", 51820), ("wg1", "198.51.100.1", 51820)]
+
+    def test_bad_config_does_not_stop_distilling(self, tmp_path, monkeypatch, capsys):
+        rows = self._run(tmp_path, monkeypatch, "[vpn\n")
+        assert rows == [("wg0", "203.0.113.7", 51820)]
+        assert "config.toml" in capsys.readouterr().err

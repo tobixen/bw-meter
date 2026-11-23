@@ -9,6 +9,7 @@ from bw_meter.db import (
     get_processed_files,
     insert_traffic_batch,
     mark_file_processed,
+    record_vpn_endpoint,
     upsert_host,
     upsert_process,
 )
@@ -25,7 +26,7 @@ def conn() -> sqlite3.Connection:
 class TestEnsureSchema:
     def test_creates_all_tables(self, conn):
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert {"process", "host", "traffic", "capture_file"} <= tables
+        assert {"process", "host", "traffic", "capture_file", "vpn_endpoint"} <= tables
 
     def test_idempotent(self, conn):
         ensure_schema(conn)  # second call must not raise
@@ -389,3 +390,21 @@ class TestInsertTrafficBatch:
         insert_traffic_batch(conn, [])
         count = conn.execute("SELECT COUNT(*) FROM traffic").fetchone()[0]
         assert count == 0
+
+
+class TestRecordVpnEndpoint:
+    def test_insert(self, conn):
+        record_vpn_endpoint(conn, "wg0", "203.0.113.7", 51820, 100)
+        assert conn.execute("SELECT interface, ip, port, last_seen FROM vpn_endpoint").fetchall() == [
+            ("wg0", "203.0.113.7", 51820, 100)
+        ]
+
+    def test_last_seen_only_moves_forward(self, conn):
+        record_vpn_endpoint(conn, "wg0", "203.0.113.7", 51820, 200)
+        record_vpn_endpoint(conn, "wg0", "203.0.113.7", 51820, 100)
+        assert conn.execute("SELECT last_seen FROM vpn_endpoint").fetchall() == [(200,)]
+
+    def test_roaming_endpoint_keeps_history(self, conn):
+        record_vpn_endpoint(conn, "wg0", "203.0.113.7", 51820, 100)
+        record_vpn_endpoint(conn, "wg0", "2001:db8::1", 51820, 200)
+        assert conn.execute("SELECT COUNT(*) FROM vpn_endpoint").fetchone()[0] == 2

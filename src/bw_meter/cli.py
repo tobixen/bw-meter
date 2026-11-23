@@ -13,6 +13,7 @@ from pathlib import Path
 import argcomplete
 
 from ._version import __version__
+from .config import ConfigError, load_config
 from .db import resolve_db_path
 from .timeutil import parse_dt
 
@@ -50,6 +51,21 @@ _DIM_SELECT = {
 # of which hostname was current when the traffic was recorded.
 _DIM_GROUP = {
     "host": "COALESCE(h.ip, '(unknown)')",
+}
+
+# The VPN interface whose tunnel a traffic row is the outer, encrypted traffic
+# of, or NULL.  Needs the host join.
+_VPN_IFACE_SQL = (
+    "(SELECT v.interface FROM vpn_endpoint v"
+    " WHERE v.ip = h.ip AND v.port = t.remote_port AND v.interface <> t.interface"
+    " ORDER BY v.last_seen DESC LIMIT 1)"
+)
+
+# Process-like dimensions as they read when VPN endpoints are known: the
+# tunnel's outer traffic is labelled "(vpn:<interface>)" whoever it is tagged with.
+_DIM_SELECT_VPN = {
+    "process": f"COALESCE('(vpn:' || {_VPN_IFACE_SQL} || ')', p.name, '(kernel)')",
+    "cmdline": f"COALESCE('(vpn:' || {_VPN_IFACE_SQL} || ')', p.args, p.cmd, '(kernel)')",
 }
 
 # JOIN needed for each dimension (None = no extra join required)
@@ -166,6 +182,24 @@ def _open_conn(args: argparse.Namespace) -> sqlite3.Connection:
 # ---------------------------------------------------------------------------
 
 
+def _vpn_interfaces(args: argparse.Namespace) -> list[str] | None:
+    """The VPN interfaces the database knows, or None if it predates VPN support.
+
+    A database that cannot be opened gives None too; opening it for the report
+    proper then says why.
+    """
+    try:
+        conn = _open_conn(args)
+    except (PermissionError, sqlite3.OperationalError):
+        return None
+    try:
+        return [row[0] for row in conn.execute("SELECT DISTINCT interface FROM vpn_endpoint ORDER BY interface")]
+    except sqlite3.DatabaseError:
+        return None
+    finally:
+        conn.close()
+
+
 def cmd_distill(args: argparse.Namespace) -> int:
     from .distiller import run_distiller
 
@@ -173,6 +207,7 @@ def cmd_distill(args: argparse.Namespace) -> int:
         base_dir=args.base_dir,
         db_path=args.db,
         delete_after=not args.no_delete,
+        config_path=getattr(args, "config", None),
     )
     return 0
 
@@ -210,6 +245,13 @@ def cmd_report(args: argparse.Namespace) -> int:
         print(f"error: --limit must be at least 1, got {limit}", file=sys.stderr)
         return 1
 
+    try:
+        config = load_config(getattr(args, "config", None))
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    vpn_ifaces = _vpn_interfaces(args)
+
     # --- Sort column and direction ---
     sort = args.sort
     if sort is None:
@@ -240,6 +282,9 @@ def cmd_report(args: argparse.Namespace) -> int:
             dim_groups.append(expr)
         else:
             sel = _DIM_SELECT[dim]
+            if vpn_ifaces is not None and dim in _DIM_SELECT_VPN:
+                sel = _DIM_SELECT_VPN[dim]
+                _add_join(_DIM_JOIN["host"])
             dim_selects.append(f"{sel} AS {dim}")
             dim_groups.append(_DIM_GROUP.get(dim, sel))
             _add_join(_DIM_JOIN[dim])
@@ -256,18 +301,44 @@ def cmd_report(args: argparse.Namespace) -> int:
     where_clauses: list[str] = ["t.ts >= ?", "t.ts < ?"]
     params: list = [since_ts, until_ts]
 
+    # Interfaces: the one asked for, else the metered ones, else all but the
+    # VPN interfaces, whose traffic is already counted as the tunnel's outer traffic.
+    left_out: list[str] = []
     if getattr(args, "interface", None):
         where_clauses.append("t.interface = ?")
         params.append(args.interface)
+    elif not getattr(args, "all_interfaces", False):
+        if config.metered is not None:
+            where_clauses.append(f"t.interface IN ({', '.join('?' * len(config.metered))})")
+            params.extend(config.metered)
+            counted_twice = [i for i in config.metered if i in (vpn_ifaces or [])]
+            if counted_twice:
+                print(
+                    f"warning: metered interface(s) {', '.join(counted_twice)} are VPN interfaces: their"
+                    " traffic is counted twice, also as '(vpn:...)' on the interface the tunnel runs over",
+                    file=sys.stderr,
+                )
+        elif vpn_ifaces:
+            where_clauses.append("t.interface NOT IN (SELECT interface FROM vpn_endpoint)")
+            left_out = vpn_ifaces
 
     process = getattr(args, "process", None)
     if process is not None:
-        if process == "(kernel)":
-            where_clauses.append("t.process_id IS NULL")
+        vpn_match = re.fullmatch(r"\(vpn:(.+)\)", process)
+        if vpn_ifaces is not None:
+            _add_join(_DIM_JOIN["host"])
+        if vpn_match and vpn_ifaces is not None:
+            where_clauses.append(f"{_VPN_IFACE_SQL} = ?")
+            params.append(vpn_match.group(1))
         else:
-            _add_join(_DIM_JOIN["process"])
-            where_clauses.append("p.name = ?")
-            params.append(process)
+            if vpn_ifaces is not None:
+                where_clauses.append(f"{_VPN_IFACE_SQL} IS NULL")
+            if process == "(kernel)":
+                where_clauses.append("t.process_id IS NULL")
+            else:
+                _add_join(_DIM_JOIN["process"])
+                where_clauses.append("p.name = ?")
+                params.append(process)
 
     host = getattr(args, "host", None)
     if host is not None:
@@ -319,6 +390,14 @@ def cmd_report(args: argparse.Namespace) -> int:
         return 1
     finally:
         conn.close()
+
+    if left_out:
+        print(
+            f"note: left out VPN interface(s) {', '.join(left_out)}: their traffic is counted"
+            " as '(vpn:...)' on the interface the tunnel runs over"
+            " (see --interface, --all-interfaces)",
+            file=sys.stderr,
+        )
 
     if not rows:
         if not any_traffic:
@@ -461,7 +540,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--interface",
         "-i",
         metavar="IFACE",
-        help="Filter to a specific interface (default: all metered interfaces from config)",
+        help="Filter to a specific interface (default: the metered interfaces from the config,"
+        " else all but VPN interfaces)",
+    )
+    parser.add_argument(
+        "--all-interfaces",
+        action="store_true",
+        default=False,
+        help="Count all interfaces, VPN interfaces and unmetered ones included",
+    )
+    parser.add_argument(
+        "--config",
+        metavar="PATH",
+        default=None,
+        help="Configuration file (default: BW_METER_CONFIG env var, or /etc/bw-meter/config.toml)",
     )
     parser.add_argument(
         "--json",

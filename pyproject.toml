@@ -28,6 +28,7 @@ keywords = ["bandwidth", "metering", "ptcpdump", "pcapng", "network"]
 dependencies = [
     "dateparser>=1.2",
     "argcomplete>=3.0",
+    "tomli>=2.0; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]

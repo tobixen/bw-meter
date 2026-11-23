@@ -7,15 +7,19 @@ import os
 import re
 import sqlite3
 import subprocess
+import sys
+import time
 from collections import defaultdict
 from collections.abc import Iterator
 from pathlib import Path
 
+from .config import Config, ConfigError, load_config, parse_endpoint
 from .db import (
     get_processed_files,
     insert_traffic_batch,
     mark_file_processed,
     open_db,
+    record_vpn_endpoint,
     upsert_host,
     upsert_process,
 )
@@ -279,6 +283,43 @@ def get_local_ips(iface: str) -> set[str]:
         return set()
 
 
+def get_wireguard_endpoints() -> dict[str, list[tuple[str, int]]]:
+    """Return the current peer endpoints of all WireGuard interfaces, via ``wg``.
+
+    Needs root.  Without ``wg`` or the privileges it needs, returns nothing.
+    """
+    try:
+        result = subprocess.run(
+            ["wg", "show", "all", "endpoints"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    endpoints: dict[str, list[tuple[str, int]]] = {}
+    for line in result.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 3 or parts[2] == "(none)":
+            continue
+        try:
+            endpoints.setdefault(parts[0], []).append(parse_endpoint(parts[2]))
+        except ConfigError:
+            continue
+    return endpoints
+
+
+def record_vpn_endpoints(conn: sqlite3.Connection, config: Config, now: int | None = None) -> None:
+    """Store the detected and the configured VPN endpoints in the database."""
+    seen = now if now is not None else int(time.time())
+    for source in (get_wireguard_endpoints(), config.vpn_endpoints):
+        for iface, endpoints in source.items():
+            for ip, port in endpoints:
+                record_vpn_endpoint(conn, iface, ip, port, seen)
+    conn.commit()
+
+
 def derive_direction(src4: str, dst4: str, src6: str, dst6: str, local_ips: set[str]) -> str:
     """Return 'out' if the packet source is a local IP, else 'in'."""
     src = src4 or src6
@@ -412,10 +453,21 @@ def run_distiller(
     db_path: Path | str | None = None,
     bucket_secs: int = BUCKET_SECS,
     delete_after: bool = True,
+    config_path: Path | str | None = None,
 ) -> None:
-    """Process all closed pcapng files under *base_dir* into the database."""
+    """Process all closed pcapng files under *base_dir* into the database.
+
+    A broken config file costs only the VPN endpoints configured in it: the
+    error goes to stderr (the journal), and distilling carries on.
+    """
+    try:
+        config = load_config(config_path)
+    except ConfigError as exc:
+        print(f"error: {exc}; ignoring the configuration", file=sys.stderr)
+        config = Config()
     conn = open_db(db_path)
     try:
+        record_vpn_endpoints(conn, config)
         processed = get_processed_files(conn)
         for iface, pcapng_path in find_distillable_files(base_dir, processed):
             distill_file(pcapng_path, iface, conn, bucket_secs)

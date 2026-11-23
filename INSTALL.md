@@ -118,13 +118,21 @@ The `--db` flag on the command line takes precedence over `BW_METER_DB`.
 
 ## Configuration
 
-TODO: NOT IMPLEMENTED YET! (except `make enable` will honor the list of metered interfaces)
-
-Create  `/etc/bw-meter/config.toml` to declare which interfaces count against your data cap:
+Create `/etc/bw-meter/config.toml` (or point `BW_METER_CONFIG` or `--config` at another
+file) to declare which interfaces count against your data cap:
 
 ```toml
 [interfaces]
-metered = ["wlan0"]   # traffic on these interfaces is shown in reports by default
+metered = ["wlan0"]   # reports count these interfaces by default; `make enable` captures them
+# Keep VPN interfaces out of `metered`, or their traffic is counted twice.  To
+# capture one anyway (for `bw-meter report --interface wg0`), name it explicitly:
+# `make enable IFACE="wlan0 wg0"` (or enable `ptcpdump@wg0.service` by hand).
+
+# Tunnel endpoints of a VPN interface, on top of the ones the distiller finds
+# with `wg show all endpoints` (it only sees the current one).  Traffic to them
+# on another interface is reported as "(vpn:wg0)".
+[vpn.wg0]
+endpoints = ["203.0.113.7:51820", "[2001:db8::7]:51820"]
 
 ## TODO: this is currently hard-coded, but we should support configuration
 [collection]

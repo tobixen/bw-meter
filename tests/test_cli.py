@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 
 import pytest
@@ -16,6 +17,7 @@ from bw_meter.cli import (
 from bw_meter.db import (
     ensure_schema,
     insert_traffic_batch,
+    record_vpn_endpoint,
     upsert_host,
     upsert_process,
 )
@@ -163,6 +165,58 @@ def db_path(tmp_path):
     return path
 
 
+@pytest.fixture
+def vpn_db_path(db_path):
+    """The test database plus a WireGuard tunnel wg0 to 203.0.113.7:51820 over wlan0."""
+    conn = sqlite3.connect(db_path)
+    record_vpn_endpoint(conn, "wg0", "203.0.113.7", 51820, BASE_TS)
+    vpn_host = upsert_host(conn, "203.0.113.7")
+    example = conn.execute("SELECT id FROM host WHERE ip='93.184.216.34'").fetchone()[0]
+    firefox = conn.execute("SELECT id FROM process WHERE name='firefox'").fetchone()[0]
+    curl = conn.execute("SELECT id FROM process WHERE name='curl'").fetchone()[0]
+    common = {"ts": BASE_TS, "bucket_secs": 60, "packets": 1}
+    outer = {**common, "interface": "wlan0", "host_id": vpn_host, "protocol": "wireguard", "remote_port": 51820}
+    insert_traffic_batch(
+        conn,
+        [
+            # outer, encrypted traffic: mostly untagged, some wrongly tagged
+            {**outer, "process_id": None, "direction": "in", "bytes": 3_000},
+            {**outer, "process_id": None, "direction": "out", "bytes": 300},
+            {**outer, "process_id": curl, "direction": "out", "bytes": 50},
+            # the same traffic inside the tunnel
+            {
+                **common,
+                "interface": "wg0",
+                "host_id": example,
+                "protocol": "tcp",
+                "remote_port": 443,
+                "process_id": firefox,
+                "direction": "in",
+                "bytes": 2_500,
+            },
+            {
+                **common,
+                "interface": "wg0",
+                "host_id": example,
+                "protocol": "tcp",
+                "remote_port": 443,
+                "process_id": firefox,
+                "direction": "out",
+                "bytes": 200,
+            },
+        ],
+    )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def _report_json(capsys, **kwargs) -> dict:
+    """Run a JSON report grouped by process; return {process: total_bytes}."""
+    assert cmd_report(_args(json=True, **kwargs)) == 0
+    return {row["process"]: row["total_bytes"] for row in json.loads(capsys.readouterr().out)}
+
+
 def _args(**kwargs) -> argparse.Namespace:
     """Build a minimal Namespace for testing; since/until default to a wide range."""
     defaults = {
@@ -177,6 +231,8 @@ def _args(**kwargs) -> argparse.Namespace:
         "interval": "1h",
         "limit": None,
         "percentage": False,
+        "config": os.devnull,
+        "all_interfaces": False,
         "process": None,
         "host": None,
         "port": None,
@@ -739,3 +795,109 @@ class TestIntervalValidation:
     def test_zero_interval_rejected(self, db_path, capsys):
         rc = cmd_report(_args(db=db_path, group_by="time", interval="0m"))
         assert rc == 1
+
+
+# ---------------------------------------------------------------------------
+# VPN traffic and metered interfaces
+# ---------------------------------------------------------------------------
+
+
+class TestVpn:
+    def test_outer_traffic_is_labelled_with_the_vpn(self, db_path, vpn_db_path, capsys):
+        before = _report_json(capsys, db=db_path)
+        totals = _report_json(capsys, db=vpn_db_path)
+        assert totals["(vpn:wg0)"] == 3_350
+        # neither the untagged nor the wrongly tagged outer bytes count for anyone else
+        assert totals["curl"] == before["curl"]
+        assert totals["(kernel)"] == before["(kernel)"]
+
+    def test_vpn_interface_left_out_by_default(self, db_path, vpn_db_path, capsys):
+        before = _report_json(capsys, db=db_path)
+        assert _report_json(capsys, db=vpn_db_path)["firefox"] == before["firefox"]
+
+    def test_note_names_left_out_interface(self, vpn_db_path, capsys):
+        cmd_report(_args(db=vpn_db_path))
+        err = capsys.readouterr().err
+        assert "wg0" in err
+        assert "--all-interfaces" in err
+
+    def test_no_note_without_vpn(self, db_path, capsys):
+        cmd_report(_args(db=db_path))
+        assert capsys.readouterr().err == ""
+
+    def test_interface_option_shows_inner_traffic(self, vpn_db_path, capsys):
+        assert cmd_report(_args(db=vpn_db_path, interface="wg0", json=True)) == 0
+        captured = capsys.readouterr()
+        assert {row["process"]: row["total_bytes"] for row in json.loads(captured.out)} == {"firefox": 2_700}
+        assert captured.err == ""
+
+    def test_all_interfaces(self, db_path, vpn_db_path, capsys):
+        before = _report_json(capsys, db=db_path)
+        totals = _report_json(capsys, db=vpn_db_path, all_interfaces=True)
+        assert totals["firefox"] == before["firefox"] + 2_700
+        assert totals["(vpn:wg0)"] == 3_350
+
+    def test_process_filter_on_vpn_label(self, vpn_db_path, capsys):
+        cmd_report(_args(db=vpn_db_path, json=True, group_by="ip", process="(vpn:wg0)"))
+        rows = json.loads(capsys.readouterr().out)
+        assert [(r["ip"], r["total_bytes"]) for r in rows] == [("203.0.113.7", 3_350)]
+
+    def test_process_filter_excludes_vpn_traffic(self, db_path, vpn_db_path, capsys):
+        before = _report_json(capsys, db=db_path, process="curl")
+        assert _report_json(capsys, db=vpn_db_path, process="curl") == before
+        before = _report_json(capsys, db=db_path, process="(kernel)")
+        assert _report_json(capsys, db=vpn_db_path, process="(kernel)") == before
+
+    def test_label_prefers_most_recently_seen_interface(self, vpn_db_path, capsys):
+        conn = sqlite3.connect(vpn_db_path)
+        record_vpn_endpoint(conn, "wg-old", "203.0.113.7", 51820, BASE_TS - 1000)
+        record_vpn_endpoint(conn, "wg-new", "203.0.113.7", 51820, BASE_TS + 1000)
+        conn.commit()
+        conn.close()
+        totals = _report_json(capsys, db=vpn_db_path)
+        assert totals["(vpn:wg-new)"] == 3_350
+
+    def test_database_without_vpn_table(self, db_path, capsys):
+        conn = sqlite3.connect(db_path)
+        conn.execute("DROP TABLE vpn_endpoint")
+        conn.commit()
+        conn.close()
+        assert cmd_report(_args(db=db_path)) == 0
+        assert "firefox" in capsys.readouterr().out
+
+
+class TestMetered:
+    def test_metered_interfaces_from_config(self, vpn_db_path, tmp_path, capsys):
+        config = tmp_path / "config.toml"
+        config.write_text('[interfaces]\nmetered = ["eth0"]\n')
+        assert cmd_report(_args(db=vpn_db_path, config=str(config), json=True)) == 0
+        captured = capsys.readouterr()
+        assert {row["process"]: row["total_bytes"] for row in json.loads(captured.out)} == {"curl": 9_999}
+        assert captured.err == ""
+
+    def test_interface_option_overrides_metered(self, vpn_db_path, tmp_path, capsys):
+        config = tmp_path / "config.toml"
+        config.write_text('[interfaces]\nmetered = ["eth0"]\n')
+        assert _report_json(capsys, db=vpn_db_path, config=str(config), interface="wg0") == {"firefox": 2_700}
+
+    def test_warns_when_metered_includes_a_vpn_interface(self, vpn_db_path, tmp_path, capsys):
+        config = tmp_path / "config.toml"
+        config.write_text('[interfaces]\nmetered = ["wlan0", "wg0"]\n')
+        assert cmd_report(_args(db=vpn_db_path, config=str(config), json=True)) == 0
+        captured = capsys.readouterr()
+        assert "(vpn:wg0)" in {row["process"] for row in json.loads(captured.out)}
+        err = captured.err
+        assert "wg0" in err
+        assert "twice" in err
+
+    def test_no_warning_when_interface_given(self, vpn_db_path, tmp_path, capsys):
+        config = tmp_path / "config.toml"
+        config.write_text('[interfaces]\nmetered = ["wlan0", "wg0"]\n')
+        assert cmd_report(_args(db=vpn_db_path, config=str(config), interface="wg0", json=True)) == 0
+        assert capsys.readouterr().err == ""
+
+    def test_bad_config_is_an_error(self, db_path, tmp_path, capsys):
+        config = tmp_path / "config.toml"
+        config.write_text("[interfaces\n")
+        assert cmd_report(_args(db=db_path, config=str(config))) == 1
+        assert "config.toml" in capsys.readouterr().err

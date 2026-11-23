@@ -37,6 +37,8 @@ handled by kernel code with no associated socket/process — in practice this me
 
 - **WireGuard traffic on the physical interface**: the WireGuard kernel module forwards UDP
   packets without a userspace process.
+- **Inbound packets on WireGuard/tun interfaces**, up to ptcpdump 0.37.2 — a ptcpdump bug,
+  reported upstream as https://github.com/mozillazg/ptcpdump/issues/427.
 - A small number of other kernel-generated packets (ARP, ICMP, DHCP, etc.).
 
 ### Multi-interface capture
@@ -55,8 +57,22 @@ Each instance captures its interface to a rolling sequence of pcapng files under
 Which interfaces are *metered* (i.e. count against a data cap) is a configuration concern,
 not a capture concern.  Capture everything; mark interfaces metered in the config.
 
-Merging data across interfaces (e.g. attributing untagged WireGuard bytes on `wlan0` to
-processes visible in the `wg0` capture) is a **future improvement** — see TODO list.
+### VPN traffic
+
+Traffic through a WireGuard tunnel is captured twice: decrypted on the VPN interface
+(`wg0`), and encrypted on the interface the tunnel runs over (`wlan0`, UDP to the peer's
+endpoint).  Summing all interfaces would count it twice.
+
+The distiller records each VPN interface's tunnel endpoints in the `vpn_endpoint` table,
+from `wg show all endpoints` on every run, plus any listed in the config.  Reports then
+
+- label the outer traffic to an endpoint `(vpn:wg0)`, instead of `(kernel)` or a process
+  it was wrongly attributed to.  It is what counts against a data cap, encryption
+  overhead included;
+- leave the VPN interface itself out by default, with a note on stderr.  `--interface wg0`
+  shows that traffic by process, `--all-interfaces` counts everything.
+
+With `metered` set in the config, the metered interfaces decide instead.
 
 ### Overhead
 
@@ -244,8 +260,11 @@ bw-meter report --group-by process --show in,out,total,packets
 ### Global options
 
 - `--db PATH` — SQLite database path (default: `$BW_METER_DB`, else `/var/lib/bw-meter/bw-meter.db`)
-- `--interface IFACE` — restrict to one interface (default: all interfaces marked metered
-  in config)
+- `--interface IFACE` — restrict to one interface (default: the `metered` interfaces from
+  the config, else all interfaces but VPN interfaces)
+- `--all-interfaces` — count every interface
+- `--config PATH` — configuration file (default: `$BW_METER_CONFIG`, else
+  `/etc/bw-meter/config.toml`)
 
 ### Output formats
 
@@ -255,7 +274,8 @@ Default: plain text table.  `--json` for machine-readable output.
 
 ## Configuration
 
-A configuration file should be supported.  See the INSTALL.md
+`/etc/bw-meter/config.toml` declares the metered interfaces and extra VPN endpoints; see
+INSTALL.md.  The `[collection]` settings described there are not read yet.
 
 ---
 
@@ -287,11 +307,11 @@ I think we need only one CLI reporting command, and it should be fairly general.
 
 ## Fix later
 
-* Support for Configuration file (see the INSTALL.md document)
+* The `[collection]` settings of the configuration file (see the INSTALL.md document)
 
-* **WireGuard/VPN merging** — attribute untagged WireGuard bytes on a physical interface
-   to processes by proportional allocation from a simultaneously-captured VPN inner
-   interface.  Requires the user to declare in config which interface pairs to merge.
+* **WireGuard/VPN merging** — attribute the `(vpn:wg0)` bytes on a physical interface
+   to processes by proportional allocation from the VPN interface's own capture, so a
+   single report shows both the right total and who caused it.
 
 * **Alerts** — notify when a process exceeds N MB in a rolling window, or when total
    monthly usage crosses a threshold.
