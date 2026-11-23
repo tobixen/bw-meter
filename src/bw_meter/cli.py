@@ -24,6 +24,8 @@ VALID_SHOW = ("in", "out", "total", "packets")
 
 # Label of the row summing up what --limit cut off
 OTHER_LABEL = "(other)"
+# Label of the table's final row, summing up all rows
+SUM_LABEL = "(sum)"
 
 # SQL expression for each dimension (excluding "time", which is dynamic)
 _DIM_SELECT = {
@@ -123,11 +125,12 @@ def _parse_interval(s: str) -> int:
     return secs
 
 
-def _print_table(headers: list[str], rows: list[list]) -> None:
-    """Print a plain fixed-width text table to stdout."""
+def _print_table(headers: list[str], rows: list[list], footer: list | None = None) -> None:
+    """Print a plain fixed-width text table to stdout, *footer* below a second rule."""
     str_rows = [[str(c) for c in row] for row in rows]
+    str_footer = [str(c) for c in footer] if footer is not None else None
     widths = [len(h) for h in headers]
-    for row in str_rows:
+    for row in str_rows + ([str_footer] if str_footer else []):
         for i, cell in enumerate(row):
             widths[i] = max(widths[i], len(cell))
     sep = "  "
@@ -136,6 +139,9 @@ def _print_table(headers: list[str], rows: list[list]) -> None:
     print(sep.join("-" * w for w in widths))
     for row in str_rows:
         print(fmt.format(*row))
+    if str_footer:
+        print(sep.join("-" * w for w in widths))
+        print(fmt.format(*str_footer))
 
 
 def _time_range(args: argparse.Namespace) -> tuple[int, int]:
@@ -331,6 +337,17 @@ def cmd_report(args: argparse.Namespace) -> int:
         return 0
 
     n_dims = len(group_by)
+    n_cols = n_dims + len(_MEASURE_IDX)
+    grand_totals = [sum(r[i] or 0 for r in rows) for i in range(n_dims, n_cols)]
+    percentage = getattr(args, "percentage", False)
+
+    def _measure(row: tuple, col: str) -> float | int:
+        """The value of measure *col* in *row*: an absolute count, or with --percentage its share in percent."""
+        idx = _MEASURE_IDX[col]
+        val = row[n_dims + idx] or 0
+        if not percentage:
+            return val
+        return 100 * val / grand_totals[idx] if grand_totals[idx] else 0.0
 
     # --- LIMIT: sum up the long tail into one "(other)" row ---
     # The dimensions of that row are None; the table labels it, JSON marks it.
@@ -339,7 +356,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         tail = rows[limit:]
         rows = rows[:limit]
         other_row = (None,) * n_dims
-        other_row += tuple(sum(r[i] or 0 for r in tail) for i in range(n_dims, len(tail[0])))
+        other_row += tuple(sum(r[i] or 0 for r in tail) for i in range(n_dims, n_cols))
         rows.append(other_row)
 
     if getattr(args, "json", False):
@@ -354,11 +371,25 @@ def cmd_report(args: argparse.Namespace) -> int:
             if row is other_row:
                 obj["other"] = True
             for col in show_cols:
-                obj[_SHOW_JSON_KEY[col]] = row[n_dims + _MEASURE_IDX[col]]
+                obj[_SHOW_JSON_KEY[col]] = _measure(row, col)
             result.append(obj)
         print(json.dumps(result))
     else:
         headers = [_DIM_HEADER[dim] for dim in group_by] + [_SHOW_HEADER[col] for col in show_cols]
+
+        def _format_measure(row: tuple) -> list:
+            """The table cells of the shown measures of *row*."""
+            cells: list = []
+            for col in show_cols:
+                val = _measure(row, col)
+                if percentage:
+                    cells.append(f"{val:.1f}%")
+                elif col in ("in", "out", "total"):
+                    cells.append(_format_bytes(val))
+                else:
+                    cells.append(val)
+            return cells
+
         table_rows = []
         for row in rows:
             cells: list = []
@@ -375,11 +406,11 @@ def cmd_report(args: argparse.Namespace) -> int:
                 elif val is None:
                     val = "(unknown)"
                 cells.append(val)
-            for col in show_cols:
-                val = row[n_dims + _MEASURE_IDX[col]] or 0
-                cells.append(_format_bytes(val) if col in ("in", "out", "total") else val)
+            cells.extend(_format_measure(row))
             table_rows.append(cells)
-        _print_table(headers, table_rows)
+        sum_row = (SUM_LABEL,) + (None,) * (n_dims - 1) + tuple(grand_totals)
+        footer = [SUM_LABEL] + [""] * (n_dims - 1) + _format_measure(sum_row)
+        _print_table(headers, table_rows, footer)
 
     return 0
 
@@ -510,6 +541,13 @@ Examples:
         type=int,
         metavar="N",
         help="Show the top N rows, plus an '(other)' row summing up the rest",
+    )
+    p_report.add_argument(
+        "--percentage",
+        "-p",
+        action="store_true",
+        default=False,
+        help="Show each measure as its percentage of the sum, not as an absolute amount",
     )
     p_report.add_argument(
         "--process",

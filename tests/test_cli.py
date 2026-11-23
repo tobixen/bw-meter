@@ -176,6 +176,7 @@ def _args(**kwargs) -> argparse.Namespace:
         "show": "in,out,total",
         "interval": "1h",
         "limit": None,
+        "percentage": False,
         "process": None,
         "host": None,
         "port": None,
@@ -272,7 +273,7 @@ class TestGroupByProcess:
     def test_limit_sums_long_tail_into_other_row(self, db_path, capsys):
         cmd_report(_args(db=db_path, limit=1))
         lines = capsys.readouterr().out.strip().splitlines()
-        assert lines[-1].startswith("(other)")
+        assert lines[-3].startswith("(other)")
 
     def test_limit_no_other_row_without_tail(self, db_path, capsys):
         cmd_report(_args(db=db_path, limit=100))
@@ -294,7 +295,7 @@ class TestGroupByProcess:
     def test_limit_other_row_multi_dim_with_time(self, db_path, capsys):
         rc = cmd_report(_args(db=db_path, group_by="time,process", interval="1m", limit=1))
         assert rc == 0
-        assert capsys.readouterr().out.strip().splitlines()[-1].startswith("(other)")
+        assert capsys.readouterr().out.strip().splitlines()[-3].startswith("(other)")
         cmd_report(_args(db=db_path, group_by="time,process", interval="1m", json=True))
         tail = json.loads(capsys.readouterr().out)[1:]
         cmd_report(_args(db=db_path, group_by="time,process", interval="1m", limit=1, json=True))
@@ -311,6 +312,49 @@ class TestGroupByProcess:
         captured = capsys.readouterr()
         assert "--limit" in captured.err
         assert captured.out == ""
+
+    def test_table_ends_with_sum_row(self, db_path, capsys):
+        cmd_report(_args(db=db_path, json=True))
+        full = json.loads(capsys.readouterr().out)
+        cmd_report(_args(db=db_path, show="total,packets"))
+        lines = capsys.readouterr().out.strip().splitlines()
+        assert set(lines[-2]) <= {"-", " "}
+        assert lines[-1].split()[0] == "(sum)"
+        assert _format_bytes(sum(r["total_bytes"] for r in full)) in lines[-1]
+
+    def test_json_has_no_sum_row(self, db_path, capsys):
+        cmd_report(_args(db=db_path, json=True))
+        assert all(row["process"] != "(sum)" for row in json.loads(capsys.readouterr().out))
+
+    def test_percentage_table(self, db_path, capsys):
+        rc = cmd_report(_args(db=db_path, percentage=True))
+        assert rc == 0
+        lines = capsys.readouterr().out.strip().splitlines()
+        assert "KB" not in "\n".join(lines)
+        assert lines[-1].split()[1:] == ["100.0%"] * 3
+        cmd_report(_args(db=db_path, json=True))
+        full = json.loads(capsys.readouterr().out)
+        grand = sum(r["total_bytes"] for r in full)
+        firefox = next(line for line in lines if line.startswith("firefox"))
+        expected = next(r["total_bytes"] for r in full if r["process"] == "firefox")
+        assert firefox.split()[-1] == f"{100 * expected / grand:.1f}%"
+
+    def test_percentage_zero_total(self, db_path, capsys):
+        # nothing comes in on eth0, so the "in" column sums to zero
+        rc = cmd_report(_args(db=db_path, percentage=True, interface="eth0", show="in"))
+        assert rc == 0
+        lines = capsys.readouterr().out.strip().splitlines()
+        assert all(line.split()[-1] == "0.0%" for line in lines[2:] if not set(line) <= {"-", " "})
+
+    def test_percentage_json(self, db_path, capsys):
+        cmd_report(_args(db=db_path, json=True))
+        full = json.loads(capsys.readouterr().out)
+        cmd_report(_args(db=db_path, json=True, percentage=True, limit=1))
+        data = json.loads(capsys.readouterr().out)
+        grand = sum(r["total_bytes"] for r in full)
+        assert data[0]["total_bytes"] == pytest.approx(100 * full[0]["total_bytes"] / grand)
+        for key in ("bytes_in", "bytes_out", "total_bytes"):
+            assert sum(r[key] for r in data) == pytest.approx(100)
 
     def test_json_output(self, db_path, capsys):
         rc = cmd_report(_args(db=db_path, json=True))

@@ -201,7 +201,7 @@ should not need to remember which one this tool uses.
 ```
 bw-meter report [--since DATE] [--until DATE] [--interface IFACE]
                 [--group-by DIMS] [--show COLS] [--sort COL]
-                [--limit N] [--interval DURATION]
+                [--limit N] [--percentage] [--interval DURATION]
                 [--process NAME] [--host HOSTNAME] [--port PORT]
 ```
 
@@ -218,6 +218,11 @@ When `time` is in `--group-by`, the default sort is `time` (ascending).
 `--limit N` (N ≥ 1) shows the top N rows, followed by an `(other)` row summing up
 the rest (omitted when nothing was cut off).  In JSON output that row has all
 dimensions `null` and `"other": true`.
+
+`--percentage` (`-p`) shows each measure as its share of the sum instead of an
+absolute amount.
+
+The table always ends with a `(sum)` row; JSON output has none.
 
 `--interval` sets the time bucket size when `time` is in `--group-by` (default: `1h`).
 
